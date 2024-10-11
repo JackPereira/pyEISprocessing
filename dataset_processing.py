@@ -374,7 +374,7 @@ class EISdataset(DS):
         scores = pd.DataFrame(data=scores,index=circuit_strings,columns=filenames)
         return scores
     
-    def generate_variation(self, nvar_per_circuit, var_bounds, bound_type='relative', var_type='per circuit',difference=False, verbose=True):
+    def generate_variation(self, nvar_per_circuit, var_bounds, random_gen = 'gaussian', bound_type='relative', var_type='per circuit',difference=False, verbose=True):
         """
         TO DO:
             1. Check to make sure all self. parameters are updated
@@ -413,6 +413,7 @@ class EISdataset(DS):
         
         if isinstance(var_bounds,list):
             var_bounds = np.array(var_bounds)
+        # Scuffed var_type logic to ensure input is valid. I'll rework this at some point.
         if var_type == 'per circuit':
             single_bound = False
             uniform_bounds = False
@@ -440,6 +441,8 @@ class EISdataset(DS):
             if bound_type == 'absolute':
                 if np.size(var_bounds) != nparams:
                     raise Exception('Variation bounds not properly set. See documentation for valid inputs.')
+        if random_gen == 'gaussian' and var_type == 'dataset':
+            raise Exception('Gaussian variation is not available across the entire dataset. Set var_type to per_circuit.')
         if verbose:
             if difference:
                 print('Generating Z data with difference from baseline circuit adjustment\n=============')
@@ -483,7 +486,30 @@ class EISdataset(DS):
                 for p in range(nparams):
                     print('{} ({}): {:.3e}'.format(self.params_names_[p],self.params_units_[p],current_params[p]))
                 print('\n-------------')
-            while current_var < nvar_per_circuit:
+                
+            # Gaussian variation
+            if random_gen == 'gaussian':
+                if uniform_bounds or single_bound:
+                    var_std = var_bounds
+                else:
+                    var_std = var_bounds[c][:]
+                if bound_type == 'relative' and not single_bound:
+                    var_std *= current_params
+                var_params_c = np.empty((nvar_per_circuit,nparams))
+                for n in range(nparams):
+                    if bound_type == 'relative':
+                        if single_bound:
+                            var_params_c[:,n] = gen.normal(loc=current_params[n],scale=var_std*current_params[n],size=(nvar_per_circuit,))
+                        else:
+                            var_params_c[:,n] = gen.normal(loc=current_params[n],scale=var_std[n],size=(nvar_per_circuit,))
+                    else:
+                        if single_bound:
+                            var_params_c[:,n] = gen.normal(loc=current_params[n],scale=var_std,size=(nvar_per_circuit,))
+                        else:
+                            var_params_c[:,n] = gen.normal(loc=current_params[n],scale=var_std[n],size=(nvar_per_circuit,))
+                var_params_c[var_params_c < 0] = 1e-8 # Prevents negative values, which may be possible if std deviation is too large
+            # Uniform variation on a per-circuit basis
+            elif random_gen == 'uniform':
                 if var_type == 'per circuit':
                     if bound_type == 'relative':
                         if uniform_bounds:
@@ -498,19 +524,16 @@ class EISdataset(DS):
                     else:
                         lowerbound = var_bounds[c][:][0]
                         upperbound = var_bounds[c][:][1]
-                #if var_type == 'uniform': # changing var_type to new variable; var_type describes whether
-                # variations are per-circuit or for the whole dataset
-                var_params = gen.uniform(lowerbound,upperbound)
-                #else:
-                    #raise NotImplementedError('I need to add other generation forms')
-                var_circuit.parameters_ = var_params
-                
+                var_params_c = gen.uniform(lowerbound,upperbound,size=(nvar_per_circuit,nparams))   
+            
+            # Generating dataset for a single circuit
+            while current_var < nvar_per_circuit:
+                var_circuit.parameters_ = var_params_c[current_var]
                 if not difference:
                     self.Z_var_[total_var,:] = var_circuit.predict(self.f_gen_)
                 else:
                     self.Z_var_[total_var,:] = self.Z_basefit_[c,:] - var_circuit.predict(self.f_gen_)
-                
-                self.params_var_[total_var,:] = var_params
+                self.params_var_[total_var,:] = var_params_c[current_var]
                 self.circuitID_[total_var] = c
                 current_var += 1
                 total_var += 1
@@ -580,8 +603,8 @@ class DRTdataset(DS):
             self.tau_ = DRT_obj.tau_fine
         else:
             self.tau_ = DRT_obj.tau
-            self.DRTdata_ = np.empty((ndata,len(self.tau_)))
-            self.tags_ = np.char.mod('$.2e', self.tau_fine_)
+        self.DRTdata_ = np.empty((ndata,len(self.tau_)))
+        self.tags_ = np.char.mod('$.2e', self.tau_)
             
         rbf_type = kwargs.get('rbf_type','Gaussian')
         data_used = kwargs.get('data_used','Combined Re-Im Data')
@@ -604,8 +627,10 @@ class DRTdataset(DS):
                            der_used, lambda_value, shape_control, coeff)
             if fine:
                 self.DRTdata_[i,:] = DRT_obj.gamma
+                self.is_fine_ = True
             else:
                 self.DRTdata_[i,:] = DRT_obj.gamma[::10]
+                self.is_fine_ = False
 
             if timer:
                 if i in timed_iter:
@@ -642,6 +667,21 @@ class DRTdataset(DS):
             self.ap_ = np.hstack((self.ap_,highf_real))
             self.ap_tags_ = np.hstack((self.ap_tags_,np.array(['high f Re'])))
     
+    def course_to_fine(self):
+        if not self.contains_data_:
+            raise Exception('No data found in dataset')
+        if 'is_fine_' not in self.__dict__:
+            self.tau_ = self.tau_[::10]
+            self.DRTdata_ = self.DRTdata_[:,::10]
+            self.is_fine_ = True
+        else:
+            if self.is_fine_:
+                raise Exception('Data is already fine; cannot reduce further')
+            else:
+                self.tau_ = self.tau_[::10]
+                self.DRTdata_ = self.DRTdata_[:,::10]
+                self.is_fine_ = True
+                
     def peak_analysis(self, n_peaks, cutoff_frac = 0.1, get_gamma = True, get_tau = True, get_area = True,
                        verbose = True, der = 1):
         
