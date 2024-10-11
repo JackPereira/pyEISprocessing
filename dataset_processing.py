@@ -1,9 +1,15 @@
-# author info later
+'''
+Jack Pereira
+Department of Chemical Engineering
+University of Washington
+2024
+'''
 import os
 import time
 import warnings
 import datetime
 import numpy as np
+import pandas as pd
 import pickle
 import matplotlib.pyplot as plt
 from impedance import preprocessing
@@ -11,6 +17,7 @@ from impedance.models.circuits.fitting import circuit_fit
 from impedance.models.circuits import CustomCircuit
 from impedance.visualization import plot_nyquist
 from impedance import validation
+from sklearn import metrics
 import DRT_main as DRT
 import analysis
 
@@ -83,12 +90,92 @@ def load_obj(save_location):
 
 '''
 ======================================
+Dataset superclass. 
+Contains functions for saving, renaming, getting parameters, etc.
+======================================
+'''
+
+class DS():
+    def __init__():
+        return None
+    
+    def addparams(self, added_array, tags = None):
+        '''
+        Generic function to store additional parameters alongside impedance data.
+    
+        Parameters
+        ----------
+        added_array : numpy.ndarray
+            Array of additional parameters to store alongside core impedance dataset.
+        tags : numpy.ndarray,dtype=str or list,dtype=str, optional
+            Descriptions of each column in added_array 
+    
+        '''
+        if self.ap_ is None:
+            if tags is None:
+                tags = np.array([str('ID ' + x) for x in np.arange(1,np.size(added_array,axis=1))])
+            elif isinstance(tags,list):
+                tags = np.array(tags)
+            if not isinstance(tags,np.ndarray):
+                raise Exception('tags must be a numpy array or list')
+            self.ap_ = added_array
+            self.ap_tags_ = tags
+        else:
+            if tags is None:
+                nparams_existing = np.size(self.ap_)
+                tags = np.array([str('ID ' + x) for x in np.arange(nparams_existing,np.size(added_array,axis=1)+nparams_existing)])
+            elif isinstance(tags,list):
+                tags = np.array(tags)
+            if not isinstance(tags,np.ndarray):
+                raise Exception('tags must be a numpy array or list')
+            self.ap_ = np.hstack(self.ap_,added_array)
+            self.ap_tags_ = np.hstack(self.ap_tags_,tags)
+            
+    def rename(self, name):
+        '''
+        Updates name attribute.
+        
+        '''
+        self.name_ = name
+        
+    def clear_addparams(self):
+        '''
+        Clears the additional parameter and corresponding tag attributes.
+    
+        '''
+        self.ap_ = None
+        self.ap_tags_ = None
+    
+    def get_data(self):
+        '''
+        Returns the EIS data array and corresponding frequency (1/s) values.      
+    
+        '''
+        return self.Z_var_, self.ap_, self.f_gen_
+    
+    def get_tags(self):
+        '''
+        Returns tagged labels for the core dataset and any additional parameters.
+    
+        '''
+        return self.tags_, self.ap_tags_
+    
+    def __getstate__(self):
+        '''
+        Returns a copy of the object dictionary.
+        
+        '''
+        output = self.__dict__.copy()
+        return output
+
+'''
+======================================
 EIS dataset Class, with built-in parameter estimation 
 and variation generation functions.
 ======================================
 '''
 
-class EISdataset():
+class EISdataset(DS):
     def __init__(self, path, dataset_name, from_files = True):
         self.name_ = dataset_name
         if from_files:
@@ -113,7 +200,8 @@ class EISdataset():
         self.params_var_ = None
         self.ap_ = None
         self.ap_tags_ = None
-        
+    
+    # change to class method!
     def from_npy(self,featurepath,targetpath, f_gen, additional_params = 0):
         Z = np.load(featurepath)
         if np.any(np.issubdtype(Z[0].dtype, np.complexfloating)):
@@ -137,9 +225,9 @@ class EISdataset():
         self.source_ = 'npy file'
         self.tags_ = np.char.mod('%.2e', f_gen)
         
-    def get_circuit_parameters(self, circuit_string, parameter_guess, f_gen = np.logspace(5,-1,61), global_optimization=True,
+    def get_circuit_parameters(self, circuit_string, parameter_guess, f_gen = np.logspace(5,-1,61), global_optimization=False,
                                plot=True, save_figure=False, linKK=True,
-                               ignore_negative_data=True, validate=True, weight_by_modulus=True, verbose=True,
+                               ignore_negative_data=False, validate=True, weight_by_modulus=True, verbose=True,
                                **kwargs):
         '''
         TO DO:
@@ -241,7 +329,51 @@ class EISdataset():
         
         if verbose:
             print('Circuit fitting complete!')
+    
+    def test_circuits(self,circuit_strings,initial_guesses,score='MAPE',names=None,global_optimization=False,validate=True,save_figure=False,**kwargs):
+        ndata = len(self.files_)
+        ncir = len(circuit_strings)
+        filenames = [os.path.splitext(f)[0] for f in self.files_]
+        if names is None:
+            names = circuit_strings
+        if score is not None:
+            scores = np.empty((ncir,ndata))
         
+        for i in range(ndata):
+            f_exp = self.f_dir_[filenames[i]]
+            Z_exp = self.Z_dir_[filenames[i]]
+            Z_pred = np.empty((ncir,np.size(Z_exp)),dtype=complex)
+            fig,ax = plt.subplots(figsize=(10,8))
+            ax = plot_nyquist(Z_exp,fmt='-',ax=ax,c='blue',label='Circuit Fit')
+            for c in range(ncir):
+                p_fit, p_error = circuit_fit(f_exp, Z_exp, circuit_strings[c], initial_guesses[c], 
+                                            global_opt=global_optimization)
+                circuit = CustomCircuit(circuit=circuit_strings[c],initial_guess=p_fit)
+                circuit.parameters_ = p_fit
+                circuit.conf_ = p_error
+                Z_pred[c,:] = circuit.predict(f_exp)
+                ax = plot_nyquist(Z_pred[c,:], ax=ax,label=names[c])
+                if score == 'MAPE':
+                    scores[c,i] = metrics.mean_absolute_percentage_error(abs(Z_exp), abs(Z_pred[c]))
+                elif score == 'MSE':
+                    scores[c,i] = metrics.mean_squared_error(abs(Z_exp),abs(Z_pred[c]))
+                else:
+                    raise NotImplementedError('Other scoring metrics will be implemented in the future.')
+            if validate:
+                M, mu, Z_linKK, real_residual_linKK, imag_residual_linKK = validation.linKK(f_exp,Z_exp)
+                ax = plot_nyquist(Z_linKK,fmt='-',ax=ax,c='red',label='LinKK:\nM = {}\n$\\mu$ = {:.3f}'.format(M,mu),alpha=0.7)
+            if save_figure:
+                filepath = kwargs.get('filepath','')
+                dpi = kwargs.get('dpi',800)
+                plt.savefig(filepath+filenames[i],dpi=dpi)
+            plt.legend(loc='upper left')
+            plt.title(filenames[i])
+            plt.tight_layout()
+            plt.show()
+            
+        scores = pd.DataFrame(data=scores,index=circuit_strings,columns=filenames)
+        return scores
+    
     def generate_variation(self, nvar_per_circuit, var_bounds, bound_type='relative', var_type='per circuit',difference=False, verbose=True):
         """
         TO DO:
@@ -395,76 +527,6 @@ class EISdataset():
         Z_im = np.imag(self.Z_var_)
         return Z_re, Z_im
     
-    def addparams(self, added_array, tags = None):
-        '''
-        Generic function to store additional parameters alongside impedance data.
-
-        Parameters
-        ----------
-        added_array : numpy.ndarray
-            Array of additional parameters to store alongside core impedance dataset.
-        tags : numpy.ndarray,dtype=str or list,dtype=str, optional
-            Descriptions of each column in added_array 
-
-        '''
-        if self.ap_ is None:
-            if tags is None:
-                tags = np.array([str('ID ' + x) for x in np.arange(1,np.size(added_array,axis=1))])
-            elif isinstance(tags,list):
-                tags = np.array(tags)
-            if not isinstance(tags,np.ndarray):
-                raise Exception('tags must be a numpy array or list')
-            self.ap_ = added_array
-            self.ap_tags_ = tags
-        else:
-            if tags is None:
-                nparams_existing = np.size(self.ap_)
-                tags = np.array([str('ID ' + x) for x in np.arange(nparams_existing,np.size(added_array,axis=1)+nparams_existing)])
-            elif isinstance(tags,list):
-                tags = np.array(tags)
-            if not isinstance(tags,np.ndarray):
-                raise Exception('tags must be a numpy array or list')
-            self.ap_ = np.hstack(self.ap_,added_array)
-            self.ap_tags_ = np.hstack(self.ap_tags_,tags)
-            
-    def update_name(self, name):
-        '''
-        Updates name attribute.
-        
-        '''
-        self.name_ = name
-        
-    def clear_addparams(self):
-        '''
-        Clears the additional parameter and corresponding tag attributes.
-
-        '''
-        self.ap_ = None
-        self.ap_tags_ = None
-    
-    def get_data(self):
-        '''
-        Returns the EIS data array and corresponding frequency (1/s) values.      
-
-        '''
-        return self.Z_var_, self.ap_, self.f_gen_
-    
-    def get_tags(self):
-        '''
-        Returns tagged labels for the core dataset and any additional parameters.
-
-        '''
-        return self.tags_, self.ap_tags_
-    
-    def __getstate__(self):
-        '''
-        Returns a copy of the object dictionary.
-        
-        '''
-        output = self.__dict__.copy()
-        return output
-    #def clear_var(self):
-        # IDK IF THIS IS NEEDED
 
 '''
 ======================================
@@ -473,7 +535,7 @@ transform EIS data into equivalent DRT spectra.
 ======================================
 '''
         
-class DRTdataset():
+class DRTdataset(DS):
     def __init__(self,EISdata):
         self.f_gen_ = EISdata.f_gen_
         self.circuitID_ = EISdata.circuitID_
@@ -514,16 +576,12 @@ class DRTdataset():
         '''
         DRT_obj = DRT.EIS_object(self.f_gen_,1,1)
         ndata = np.size(EISdata.Z_var_,axis=0)
-        self.tau_ = DRT_obj.tau
-        self.tau_fine_ = DRT_obj.tau_fine
         if fine:
             self.tau_ = DRT_obj.tau_fine
-            self.DRTdata_ = np.empty((ndata,len(self.tau_fine_)))
-            self.tags_ = np.char.mod('$.2e', self.tau_fine_)
         else:
             self.tau_ = DRT_obj.tau
             self.DRTdata_ = np.empty((ndata,len(self.tau_)))
-            self.tags_ = np.char.mod('$.2e', self.tau_)
+            self.tags_ = np.char.mod('$.2e', self.tau_fine_)
             
         rbf_type = kwargs.get('rbf_type','Gaussian')
         data_used = kwargs.get('data_used','Combined Re-Im Data')
@@ -598,43 +656,7 @@ class DRTdataset():
                 raise Exception('Peak data already added')
             self.ap_ = np.hstack((self.ap_,peakdata))
             self.ap_tags_ = np.hstack((self.ap_tags_,tags))
-
-    def clear_addparams(self):
-        '''
-        Clears the additional parameter and corresponding tag attributes.
-
-        '''
-        self.ap_ = None
-        self.ap_tags_ = None
-        
-    def get_data(self):
-        '''
-        Returns the DRT data array and corresponding tau (s) values.      
-
-        '''
-        if not self.contains_data_:
-            raise Exception('Data not found in DRTdataset')
-        DRTdata = self.DRTdata_.copy()
-        tau = self.tau_.copy()
-        
-        return DRTdata, tau
-
-    def get_tags(self):
-        '''
-        Returns tagged labels for the core dataset and any additional parameters.
-
-        '''
-        tags = self.tags_.copy()
-        ap_tags = self.ap_tags_.copy()
-        return tags, ap_tags
     
-    def __getstate__(self):
-        '''
-        Returns a copy of the object dictionary.
-        
-        '''
-        output = self.__dict__.copy()
-        return output
     
 '''
 ======================================
@@ -646,14 +668,13 @@ class Transformer():
     '''
     I'm working on making proper documentation for usage here.
     The gist, for now, is that users should make a subclass containing the following:
-        1. __init__ that calls super().__init__()
-        2. transform(self,params) that transforms parameters and returns new p, names, and units as lists
-        
+        1. transform(self,params) that transforms parameters and returns new p, names, and units as lists
+        2. (optional) inv_transform(self,params) that reverses transform()
     Example below:
     -----------------
 class omega_transform(Transformer):
     def __init__(self):
-        super().__init__()
+        return None
     
     def transform(self,params,constants=None):
         # transforms EQC parameters for the circuit 'R0-p(R2-G2,C2)' into impedance base units (1/s, R)
@@ -666,10 +687,21 @@ class omega_transform(Transformer):
         params_trns = [rohm,r2,w2,rg,wg]
         names_trns = ['R0','R2','W2','Rg','Wg']
         units_trns = ['Ohm','Ohm','1/s','Ohm','1/s']
-        
+
         return params_trns, names_trns, units_trns
+    
+    def inv_transform(self,params_constants=None):
+        rohm = params[:,0]
+        r2 = params[:,1]
+        rg = params[:,3]
+        tg = params[:,3]/params[:,4]
+        c2 = params[:,1]/params[:,2]
         
-        return params_trns, names_trns, units_trns
+        params_inv = [rohm,r2,rg,tg,c2]
+        names_inv = ['R0','R2','Rg','tg','C2']
+        units_inv = ['Ohm','Ohm','Ohm','s','C2']
+        
+        return params_inv, names_inv, units_inv
     -----------------
     '''
     def __init__(self):
