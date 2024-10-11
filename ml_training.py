@@ -1,3 +1,9 @@
+'''
+Jack Pereira
+Department of Chemical Engineering
+University of Washington
+2024
+'''
 import numpy as np
 import dataset_processing as dtsp
 import pytorch_integration as pyti
@@ -8,7 +14,7 @@ import warnings
 
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MaxAbsScaler
-#from sklearn.model_selection import GridSearchCV
+#from sklearn.model_selection import GriDS_objearchCV
 from sklearn import metrics
 from sklearn.neural_network import MLPRegressor
 from sklearn.neural_network import MLPClassifier
@@ -27,13 +33,13 @@ pyTorch preprocessing and training
 ======================================
 '''
 
-def pyt_preprocess_and_train(ModelDS, DS, name=None, cast_as_complex = False,learning_rate = 1e-3, epochs=50, batch_size=100, 
+def pyt_preprocess_and_train(ModelDS_obj, DS_obj, name=None, cast_as_complex = False,learning_rate = 1e-3, epochs=50, batch_size=100, 
                              dynamic_lr = False, scoring=True, plotting=False,savefig=True,savepath='',verbose=True,**kwargs):
-    if ModelDS.model_type_ != 'pyTorch Module':
+    if ModelDS_obj.model_type_ != 'pyTorch Module':
         raise Exception('pytorch_train can only be used on pyTorch neural networks (subclasses of nn.Module)')
     
     data_select = kwargs.get('data_select','all')
-    ModelDS.load_data(DS,data_select=data_select)
+    ModelDS_obj.load_data(DS_obj,data_select=data_select)
     if verbose:
         print('Data loaded\n-------------')
     test_size = kwargs.get('test_size',0.2)
@@ -46,33 +52,33 @@ def pyt_preprocess_and_train(ModelDS, DS, name=None, cast_as_complex = False,lea
     # (which sorta defeats the whole purpose of wrapping both Zre and Zim into a single value,
     # as it's essentially unnecessary data loss when compared to split Re/Im float representations)
     # See: https://pytorch.org/docs/stable/complex_numbers.html
-        ModelDS.is_complex_ = True
-        ModelDS.pyt_train_test_split(test_size=test_size,random_state=random_state)
+        ModelDS_obj.is_complex_ = True
+        ModelDS_obj.pyt_train_test_split(test_size=test_size,random_state=random_state)
         if verbose:
             print('Data split into train/test sets\nTest size = {:.1%}\n-------------'.format(test_size))
         
         scaler = kwargs.get('scaler',MaxAbsScaler())
-        ModelDS.pyt_scale_data(scaler=scaler)
+        ModelDS_obj.pyt_scale_data(scaler=scaler)
         if verbose:
             print('Data scaled\n-------------')
             print('Training model\n-------------')
     else:
-        ModelDS.is_complex_ = False
-        ModelDS.split_re_im()
-        ModelDS.train_test_split(test_size=test_size,random_state=random_state)
+        ModelDS_obj.is_complex_ = False
+        ModelDS_obj.split_re_im()
+        ModelDS_obj.train_test_split(test_size=test_size,random_state=random_state)
         if verbose:
             print('Data split into train/test sets\nTest size = {:.1%}\n-------------'.format(test_size))
         scaler = kwargs.get('scaler',MaxAbsScaler())
-        ModelDS.scale_data(scaler=scaler)
+        ModelDS_obj.scale_data(scaler=scaler)
         
         if verbose:
             print('Data scaled\n-------------')
             print('Training model\n-------------')
     
-    pyt_train(ModelDS,learning_rate=learning_rate,epochs=epochs,dynamic_lr=dynamic_lr,batch_size=batch_size,
+    pyt_train(ModelDS_obj,learning_rate=learning_rate,epochs=epochs,dynamic_lr=dynamic_lr,batch_size=batch_size,
               scoring=scoring,plotting=plotting,verbose=verbose,**kwargs)
     
-def pyt_train(ModelDS,learning_rate = 1e-3, epochs=50, batch_size=100,
+def pyt_train(ModelDS_obj,learning_rate = 1e-3, epochs=50, batch_size=100,
               dynamic_lr=False, dlr_epoch= 30, dlr_scheduler='exp',
               scoring=True, plotting=False,verbose=True,**kwargs):
     '''
@@ -81,7 +87,7 @@ def pyt_train(ModelDS,learning_rate = 1e-3, epochs=50, batch_size=100,
             1a. ISSUE: I don't think it's possible to pass optim.Optimizer directly, 
             as it would be initialized before the model is sent to device.
             1b. https://discuss.pytorch.org/t/should-i-create-optimizer-after-sending-the-model-to-gpu/133418
-            It may be possible? Needs testing
+            It may be possible? NeeDS_obj testing
         2.  [DONE] Handle different loss functions:
             2a. Should be relatively simple, as these can get passed explicitly and
             then sent to device.
@@ -93,7 +99,7 @@ def pyt_train(ModelDS,learning_rate = 1e-3, epochs=50, batch_size=100,
 
     Parameters
     ----------
-    ModelDS : TYPE
+    ModelDS_obj : TYPE
         DESCRIPTION.
     learning_rate : TYPE, optional
         DESCRIPTION. The default is 1e-3.
@@ -120,16 +126,16 @@ def pyt_train(ModelDS,learning_rate = 1e-3, epochs=50, batch_size=100,
     None.
 
     '''
-    if ModelDS.model_type_ != 'pyTorch Module':
+    if ModelDS_obj.model_type_ != 'pyTorch Module':
         raise Exception('pytorch_train can only be used on pyTorch neural networks (subclasses of nn.Module)')
-    if ModelDS.is_complex_:
+    if ModelDS_obj.is_complex_:
         dtypes = torch.cfloat
     else:
         dtypes = torch.float
     device = pyti.get_device()
     if verbose:
         print('Using {} device\n-------------'.format(device))
-    model = ModelDS.model_.to(device,dtype=dtypes)
+    model = ModelDS_obj.model_.to(device,dtype=dtypes)
     for param in model.parameters():
         param.data = param.data.to(dtypes)
         
@@ -145,17 +151,17 @@ def pyt_train(ModelDS,learning_rate = 1e-3, epochs=50, batch_size=100,
         if isinstance(target_weights,list):
             target_weights = np.array(target_weights)
         elif target_weights is None or target_weights == 'none':
-            target_weights = np.ones(np.size(ModelDS.p_train_,axis=1),1)
+            target_weights = np.ones(np.size(ModelDS_obj.p_train_,axis=1),1)
         elif isinstance(target_weights,str):
             if not target_weights == 'batch mean' or target_weights == 'none':
                 raise Exception('Available loss_weights string inputs: batch mean or none')
         else:
             raise Exception('Invalid loss_weights input')
     else:
-        target_weights = pyti.tensor_transform(np.mean(ModelDS.p_train_,axis=0),dtypes)
+        target_weights = pyti.tensor_transform(np.mean(ModelDS_obj.p_train_,axis=0),dtypes)
         
-    training_data = pyti.Data(ModelDS.Z_train_,ModelDS.p_train_,dtypes=dtypes)
-    testing_data = pyti.Data(ModelDS.Z_test_,ModelDS.p_test_,dtypes=dtypes)
+    training_data = pyti.Data(ModelDS_obj.Z_train_,ModelDS_obj.p_train_,dtypes=dtypes)
+    testing_data = pyti.Data(ModelDS_obj.Z_test_,ModelDS_obj.p_test_,dtypes=dtypes)
     train_dataloader = DataLoader(training_data, batch_size=batch_size, shuffle=True)
     test_dataloader = DataLoader(testing_data, batch_size=batch_size, shuffle=True)
 
@@ -202,22 +208,22 @@ def pyt_train(ModelDS,learning_rate = 1e-3, epochs=50, batch_size=100,
                         print('New learning rate: {:.3e}'.format(current_lr))
                         old_lr = current_lr
             
-    p_test_pred = model(torch.from_numpy(ModelDS.Z_test_).to(device,dtype=dtypes))
+    p_test_pred = model(torch.from_numpy(ModelDS_obj.Z_test_).to(device,dtype=dtypes))
     p_test_pred = p_test_pred.detach().cpu().numpy()
-    p_train_pred = model(torch.from_numpy(ModelDS.Z_train_).to(device,dtype=dtypes))
+    p_train_pred = model(torch.from_numpy(ModelDS_obj.Z_train_).to(device,dtype=dtypes))
     p_train_pred = p_train_pred.detach().cpu().numpy()
     
-    ModelDS.p_test_pred_ = p_test_pred
-    ModelDS.p_train_pred_ = p_train_pred
+    ModelDS_obj.p_test_pred_ = p_test_pred
+    ModelDS_obj.p_train_pred_ = p_train_pred
     del p_test_pred
     del p_train_pred
     
     if scoring:
-        get_scores(ModelDS,verbose=verbose)
+        get_scores(ModelDS_obj,verbose=verbose)
     if plotting:
-        titles = kwargs.get('titles',ModelDS.params_names_)
-        axes_units = kwargs.get('axes_units',ModelDS.params_units_)
-        plotgen.plot_results(titles,axes_units,ModelDS.p_test_,ModelDS.p_test_pred_,ModelDS.name_,ModelDS.dataname_)
+        titles = kwargs.get('titles',ModelDS_obj.params_names_)
+        axes_units = kwargs.get('axes_units',ModelDS_obj.params_units_)
+        plotgen.plot_results(titles,axes_units,ModelDS_obj.p_test_,ModelDS_obj.p_test_pred_,ModelDS_obj.name_,ModelDS_obj.dataname_)
 
 '''
 ======================================
@@ -225,57 +231,57 @@ Scikit-learn preprocessing and training
 ======================================
 '''
 
-def preprocess_and_train(ModelDS, DS, name=None, scoring=True, plotting=False,
+def preprocess_and_train(ModelDS_obj, DS_obj, name=None, scoring=True, plotting=False,
                          savefig=True,savepath='',verbose=True,**kwargs):
-    if ModelDS.model_type_ != 'Random Forest' and  ModelDS.model_type_ != 'Multi-layer Perceptron':
+    if ModelDS_obj.model_type_ != 'Random Forest' and  ModelDS_obj.model_type_ != 'Multi-layer Perceptron':
         raise Exception('preprocess_and_train() only valid for sk-learn models. Currently supported: Random Forest, Multi-layer Perceptron')
     
     data_select = kwargs.get('data_select','all')
-    ModelDS.load_data(DS,data_select=data_select)
-    ModelDS.split_re_im()
+    ModelDS_obj.load_data(DS_obj,data_select=data_select)
+    ModelDS_obj.split_re_im()
     if verbose:
         print('Data loaded and split into real and imaginary components\n-------------')
     test_size = kwargs.get('test_size',0.2)
     random_state = kwargs.get('random_state',None)
-    ModelDS.train_test_split(test_size=test_size,random_state=random_state)
+    ModelDS_obj.train_test_split(test_size=test_size,random_state=random_state)
     if verbose:
         print('Data split into train/test sets\nTest size = {:.1%}\n-------------'.format(test_size))
     
     scaler = kwargs.get('scaler',MaxAbsScaler())
-    ModelDS.scale_data(scaler=scaler)
+    ModelDS_obj.scale_data(scaler=scaler)
     if verbose:
         print('Data scaled\n-------------')
         print('Training model\n-------------')
-    train(ModelDS,scoring=scoring,plotting=plotting,verbose=verbose)
+    train(ModelDS_obj,scoring=scoring,plotting=plotting,verbose=verbose)
         
-def train(ModelDS,scoring=True,plotting=False,verbose=True,**kwargs):
-    if ModelDS.model_type_ != 'Random Forest' and  ModelDS.model_type_ != 'Multi-layer Perceptron':
+def train(ModelDS_obj,scoring=True,plotting=False,verbose=True,**kwargs):
+    if ModelDS_obj.model_type_ != 'Random Forest' and  ModelDS_obj.model_type_ != 'Multi-layer Perceptron':
         raise Exception('train() only valid for sk-learn models. Currently supported: Random Forest, Multi-layer Perceptron')
     
-    Z_train, Z_test, p_train = ModelDS.Z_train_, ModelDS.Z_test_, ModelDS.p_train_
-    ModelDS.model_.fit(Z_train, p_train)
-    p_train_pred = ModelDS.model_.predict(Z_train)
-    p_test_pred = ModelDS.model_.predict(Z_test)
-    ModelDS.p_train_pred_ = p_train_pred
-    ModelDS.p_test_pred_ = p_test_pred
+    Z_train, Z_test, p_train = ModelDS_obj.Z_train_, ModelDS_obj.Z_test_, ModelDS_obj.p_train_
+    ModelDS_obj.model_.fit(Z_train, p_train)
+    p_train_pred = ModelDS_obj.model_.predict(Z_train)
+    p_test_pred = ModelDS_obj.model_.predict(Z_test)
+    ModelDS_obj.p_train_pred_ = p_train_pred
+    ModelDS_obj.p_test_pred_ = p_test_pred
     
     if scoring:
-        get_scores(ModelDS,verbose=verbose)
+        get_scores(ModelDS_obj,verbose=verbose)
     if plotting:
-        titles = kwargs.get('titles',ModelDS.params_names_)
-        axes_units = kwargs.get('axes_units',ModelDS.params_units_)
-        plotgen.plot_results(titles,axes_units,ModelDS.p_test_,ModelDS.p_test_pred_,ModelDS.name_,ModelDS.dataname_)
+        titles = kwargs.get('titles',ModelDS_obj.params_names_)
+        axes_units = kwargs.get('axes_units',ModelDS_obj.params_units_)
+        plotgen.plot_results(titles,axes_units,ModelDS_obj.p_test_,ModelDS_obj.p_test_pred_,ModelDS_obj.name_,ModelDS_obj.dataname_)
         
-def get_scores(ModelDS,verbose=True):
+def get_scores(ModelDS_obj,verbose=True):
     # ONLY WORKS FOR REGRESSORS REALLY
-    r2_test = metrics.r2_score(ModelDS.p_test_,ModelDS.p_test_pred_,multioutput='raw_values')
-    r2_train = metrics.r2_score(ModelDS.p_train_,ModelDS.p_train_pred_,multioutput='raw_values')
-    rmse_test = metrics.root_mean_squared_error(ModelDS.p_test_,ModelDS.p_test_pred_,multioutput='raw_values')
-    rmse_train = metrics.root_mean_squared_error(ModelDS.p_train_,ModelDS.p_train_pred_,multioutput='raw_values')
+    r2_test = metrics.r2_score(ModelDS_obj.p_test_,ModelDS_obj.p_test_pred_,multioutput='raw_values')
+    r2_train = metrics.r2_score(ModelDS_obj.p_train_,ModelDS_obj.p_train_pred_,multioutput='raw_values')
+    rmse_test = metrics.root_mean_squared_error(ModelDS_obj.p_test_,ModelDS_obj.p_test_pred_,multioutput='raw_values')
+    rmse_train = metrics.root_mean_squared_error(ModelDS_obj.p_train_,ModelDS_obj.p_train_pred_,multioutput='raw_values')
     if verbose:
         for x in range(np.size(r2_test)):
-            print('{}:\nR2 test: {:.3f}\nR2 train: {:.3f}\nRMSE test: {:.2e}\nRMSE train{:.2e}\n-------------'.format(ModelDS.params_names_[x],r2_test[x],r2_train[x],rmse_test[x],rmse_train[x]))
-    ModelDS.r2_test_, ModelDS.r2_train_, ModelDS.rmse_test_, ModelDS.rmse_train_ = r2_test, r2_train, rmse_test, rmse_train
+            print('{}:\nR2 test: {:.3f}\nR2 train: {:.3f}\nRMSE test: {:.2e}\nRMSE train{:.2e}\n-------------'.format(ModelDS_obj.params_names_[x],r2_test[x],r2_train[x],rmse_test[x],rmse_train[x]))
+    ModelDS_obj.r2_test_, ModelDS_obj.r2_train_, ModelDS_obj.rmse_test_, ModelDS_obj.rmse_train_ = r2_test, r2_train, rmse_test, rmse_train
 
 '''
 ======================================
@@ -325,72 +331,55 @@ class ModelDS():
             self.name_ = name
         self.model_ = model
     
-    def load_data(self,DS, data_select = 'all'):
-        # NEED TO CHANGE THIS LOGIC -> IF data_select == 'all' but one thing not provided,
-        # default to loading data that is present.
-        
-        # ALSO GRAB PARAMS
-        if isinstance(DS,dtsp.EISdataset):
+    def load_data(self,DS_obj, data_select = 'all'):
+
+        if isinstance(DS_obj,dtsp.DS):
             if self.contains_data_:
                 raise Exception('Data already found; run Model.clear_data before loading again')
+            if isinstance(DS_obj,dtsp.EISdataset):
+                Z = DS_obj.Z_var_
+            else:
+                Z = DS_obj.DRTdata_
             if data_select == 'noadded':
-                if DS.Z_var_ is None:
-                    raise Exception('No Z data found in DS')
-                self.Z_ = DS.Z_var_
-                self.tags_ = DS.tags_
+                if DS_obj.Z_var_ is None:
+                    raise Exception('No Z data found in DS_obj')
+                self.Z_ = Z
+                self.tags_ = DS_obj.tags_
             elif data_select == 'added':
-                if DS.ap_ is None:
-                    raise Exception('No added parameters found in DS')
-                self.Z_ = DS.ap_
-                self.tags_ = DS.ap_tags_
+                if DS_obj.ap_ is None:
+                    raise Exception('No added parameters found in DS_obj')
+                self.Z_ = DS_obj.ap_
+                self.tags_ = DS_obj.ap_tags_
             elif data_select == 'all':
-                if DS.ap_ is None and DS.Z_var_ is None:
-                    raise Exception('No data found in DS')
-                if DS.ap_ is None:
-                    warnings.warn('No added parameter data found in DS. Defaulting to Z data',UserWarning)
-                    self.Z_ = DS.Z_var_
-                    self.tags_ = DS.tags_
-                elif DS.Z_var_ is None:
-                    warnings.warn('No Z data found in DS. Defaulting to added parameter data',UserWarning)
-                    self.Z_ = DS.ap_
-                    self.tags_ = DS.ap_tags_
+                if DS_obj.ap_ is None and Z is None:
+                    raise Exception('No data found in DS_obj')
+                if DS_obj.ap_ is None:
+                    warnings.warn('No added parameter data found in DS_obj. Defaulting to Z data',UserWarning)
+                    self.Z_ = Z
+                    self.tags_ = DS_obj.tags_
+                elif DS_obj.Z_var_ is None:
+                    warnings.warn('No Z data found in DS_obj. Defaulting to added parameter data',UserWarning)
+                    self.Z_ = DS_obj.ap_
+                    self.tags_ = DS_obj.ap_tags_
                 else:
-                    self.Z_ = np.hstack((DS.Z_var_,DS.ap_))
-                    print(self.Z_.shape)
-                    self.tags_ = np.hstack((DS.tags_,DS.ap_tags_))
+                    self.Z_ = np.hstack((Z,DS_obj.ap_))
+                    self.tags_ = np.hstack((DS_obj.tags_,DS_obj.ap_tags_))
             else:
                 raise Exception('data_select mode invalid')
+        if isinstance(DS_obj,dtsp.EISdataset):
             self.data_type_ = 'EIS'
-
-        elif isinstance(DS,dtsp.DRTdataset):
-            if self.contains_data_:
-                raise Exception('Data already found; run [MODEL].clear_data before loading again')
-            if data_select == 'noadded':
-                if DS.DRTdata_ is None:
-                    raise Exception('No DRT data found in DS')
-                self.Z_ = DS.DRTdata_
-                self.tags_ = DS.tags_
-            elif data_select == 'added':
-                if DS.ap_ is None:
-                    raise Exception('No added parameters found in DS')
-                self.Z_ = DS.ap_
-                self.tags_ = DS.ap_tags_
-            elif data_select == 'all':
-                if DS.ap_ is None:
-                    raise Exception('No added parameters found in DS')
-                if DS.DRTdata_ is None:
-                    raise Exception('No DRT data found in DS')
-                self.Z_ = np.hstack((DS.DRTdata_,DS.ap_))
-                self.tags_ = np.hstack((DS.tags_,DS.ap_tags_))
+        elif isinstance(DS_obj,dtsp.DRTdataset):
             self.data_type_ = 'DRT'
+        else:
+            self.data_type_ = 'custom'
         
-        self.params_ = DS.params_var_
-        self.params_names_ = DS.params_names_
-        self.params_units_ = DS.params_units_
-        self.circuitID_ = DS.circuitID_
+        self.params_ = DS_obj.params_var_
+        self.params_names_ = DS_obj.params_names_
+        self.params_units_ = DS_obj.params_units_
+        self.circuitID_ = DS_obj.circuitID_
         self.contains_data_ = True
         self.data_selection_ = data_select
-        self.dataname_ = DS.name_
+        self.dataname_ = DS_obj.name_
 
     def clear_data(self):
         self.Z_ = None
@@ -501,7 +490,7 @@ class ModelDS():
                 self.Z_test_ = scaler.transform(self.Z_test_)
             else:
                 if not ignore_infoleak:
-                    raise Exception('Data not split into train and test sets. Scaling before splitting leads to infoleak between sets. Set ignore_infoleak = True to proceed')
+                    raise Exception('Data not split into train and test sets. Scaling before splitting leaDS_obj to infoleak between sets. Set ignore_infoleak = True to proceed')
                 else:
                     self.Z0_ = self.Z_.copy()
                     self.Z_ = scaler.fit_transform(self.Z_)
@@ -523,7 +512,7 @@ class ModelDS():
             self.Z_train_, self.Z_test_ = polar_to_complex(Z_train_r,Z_train_phi,Z_test_r,Z_test_phi) 
         else:
             if not ignore_infoleak:
-                raise Exception('Data not split into train and test sets. Scaling before splitting leads to infoleak between sets. Set ignore_infoleak = True to proceed')
+                raise Exception('Data not split into train and test sets. Scaling before splitting leaDS_obj to infoleak between sets. Set ignore_infoleak = True to proceed')
             else:
                 raise NotImplementedError('Scaling for pyTorch models currently not supported for unsplit data')
                 self.Z0_ = self.Z_.copy()
@@ -531,7 +520,7 @@ class ModelDS():
         self.is_scaled_ = True
         self.scalar_ = scaler
         
-    def update_name(self, name):
+    def rename(self, name):
         self.name_ = name
         
     def __getstate__(self):
