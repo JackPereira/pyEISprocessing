@@ -14,7 +14,6 @@ import warnings
 
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MaxAbsScaler
-#from sklearn.model_selection import GriDS_objearchCV
 from sklearn import metrics
 from sklearn.neural_network import MLPRegressor
 from sklearn.neural_network import MLPClassifier
@@ -33,7 +32,7 @@ pyTorch preprocessing and training
 ======================================
 '''
 
-def pyt_preprocess_and_train(ModelDS_obj, DS_obj, name=None, cast_as_complex = False,learning_rate = 1e-3, epochs=50, batch_size=100, 
+def pyt_preprocess_and_train(ModelDS_obj, DS_obj, name=None, cast_as_complex = False, scale_data=True, learning_rate = 1e-3, epochs=50, batch_size=100, 
                              dynamic_lr = False, scoring=True, plotting=False,savefig=True,savepath='',verbose=True,**kwargs):
     if ModelDS_obj.model_type_ != 'pyTorch Module':
         raise Exception('pytorch_train can only be used on pyTorch neural networks (subclasses of nn.Module)')
@@ -56,25 +55,24 @@ def pyt_preprocess_and_train(ModelDS_obj, DS_obj, name=None, cast_as_complex = F
         ModelDS_obj.pyt_train_test_split(test_size=test_size,random_state=random_state)
         if verbose:
             print('Data split into train/test sets\nTest size = {:.1%}\n-------------'.format(test_size))
-        
-        scaler = kwargs.get('scaler',MaxAbsScaler())
-        ModelDS_obj.pyt_scale_data(scaler=scaler)
-        if verbose:
-            print('Data scaled\n-------------')
-            print('Training model\n-------------')
+        if scale_data:
+            scaler = kwargs.get('scaler',MaxAbsScaler())
+            ModelDS_obj.pyt_scale_data(scaler=scaler)
+            if verbose:
+                print('Data scaled\n-------------')
     else:
         ModelDS_obj.is_complex_ = False
         ModelDS_obj.split_re_im()
         ModelDS_obj.train_test_split(test_size=test_size,random_state=random_state)
         if verbose:
             print('Data split into train/test sets\nTest size = {:.1%}\n-------------'.format(test_size))
-        scaler = kwargs.get('scaler',MaxAbsScaler())
-        ModelDS_obj.scale_data(scaler=scaler)
-        
-        if verbose:
-            print('Data scaled\n-------------')
-            print('Training model\n-------------')
-    
+        if scale_data:
+            scaler = kwargs.get('scaler',MaxAbsScaler())
+            ModelDS_obj.scale_data(scaler=scaler)
+            if verbose:
+                print('Data scaled\n-------------')
+    if verbose:
+        print('Training model\n-------------')
     pyt_train(ModelDS_obj,learning_rate=learning_rate,epochs=epochs,dynamic_lr=dynamic_lr,batch_size=batch_size,
               scoring=scoring,plotting=plotting,verbose=verbose,**kwargs)
     
@@ -153,7 +151,7 @@ def pyt_train(ModelDS_obj,learning_rate = 1e-3, epochs=50, batch_size=100,
         elif target_weights is None or target_weights == 'none':
             target_weights = np.ones(np.size(ModelDS_obj.p_train_,axis=1),1)
         elif isinstance(target_weights,str):
-            if not target_weights == 'batch mean' or target_weights == 'none':
+            if not target_weights == 'batch mean' or not target_weights == 'none':
                 raise Exception('Available loss_weights string inputs: batch mean or none')
         else:
             raise Exception('Invalid loss_weights input')
@@ -164,14 +162,19 @@ def pyt_train(ModelDS_obj,learning_rate = 1e-3, epochs=50, batch_size=100,
     testing_data = pyti.Data(ModelDS_obj.Z_test_,ModelDS_obj.p_test_,dtypes=dtypes)
     train_dataloader = DataLoader(training_data, batch_size=batch_size, shuffle=True)
     test_dataloader = DataLoader(testing_data, batch_size=batch_size, shuffle=True)
-
+    
+    allscores = np.empty((epochs,1))
+    allloss = np.empty((epochs,1))
+    
     if not dynamic_lr:
         optimizer = optim.Adam(model.parameters(),lr=learning_rate)
         for t in range(epochs):
             if verbose:
                 print(f"Epoch {t+1}\n-------------------------------")
             pyti.train_loop(train_dataloader,model,loss,optimizer,target_weights,batch_size=batch_size,dtypes=dtypes,verbose=verbose)
-            pyti.test_loop(test_dataloader,model,loss,target_weights,dtypes=dtypes,verbose=verbose)
+            closs, cscore = pyti.test_loop(test_dataloader,model,loss,target_weights,dtypes=dtypes,verbose=verbose,return_score=True)
+            allscores[t] = cscore
+            allloss[t] = closs
     else:
         optimizer = optim.Adam(model.parameters(),lr=learning_rate)
         if dlr_scheduler == 'exp':
@@ -197,16 +200,18 @@ def pyt_train(ModelDS_obj,learning_rate = 1e-3, epochs=50, batch_size=100,
             if verbose:
                 print(f"Epoch {t+1}\n-------------------------------")
             pyti.train_loop(train_dataloader, model, loss, optimizer, target_weights, batch_size=batch_size,device=device)
-            val_out = pyti.test_loop(test_dataloader, model, loss, target_weights)
+            closs, cscore = pyti.test_loop(test_dataloader,model,loss,target_weights,dtypes=dtypes,verbose=verbose,return_score=True)
             if dlr_scheduler != 'plateau':
                 scheduler.step()
             elif dlr_scheduler == 'plateau':
-                scheduler.step(val_out)
+                scheduler.step(closs)
                 current_lr = scheduler.get_last_lr()[0]
                 if verbose:
                     if current_lr != old_lr:
                         print('New learning rate: {:.3e}'.format(current_lr))
                         old_lr = current_lr
+            allscores[t] = cscore
+            allloss[t] = closs
             
     p_test_pred = model(torch.from_numpy(ModelDS_obj.Z_test_).to(device,dtype=dtypes))
     p_test_pred = p_test_pred.detach().cpu().numpy()
@@ -217,6 +222,8 @@ def pyt_train(ModelDS_obj,learning_rate = 1e-3, epochs=50, batch_size=100,
     ModelDS_obj.p_train_pred_ = p_train_pred
     del p_test_pred
     del p_train_pred
+    ModelDS_obj.score_ = allscores
+    ModelDS_obj.loss_ = allloss
     
     if scoring:
         get_scores(ModelDS_obj,verbose=verbose)
@@ -340,6 +347,7 @@ class ModelDS():
                 Z = DS_obj.Z_var_
             else:
                 Z = DS_obj.DRTdata_
+                
             if data_select == 'noadded':
                 if DS_obj.Z_var_ is None:
                     raise Exception('No Z data found in DS_obj')
@@ -357,7 +365,7 @@ class ModelDS():
                     warnings.warn('No added parameter data found in DS_obj. Defaulting to Z data',UserWarning)
                     self.Z_ = Z
                     self.tags_ = DS_obj.tags_
-                elif DS_obj.Z_var_ is None:
+                elif Z is None:
                     warnings.warn('No Z data found in DS_obj. Defaulting to added parameter data',UserWarning)
                     self.Z_ = DS_obj.ap_
                     self.tags_ = DS_obj.ap_tags_
@@ -366,17 +374,17 @@ class ModelDS():
                     self.tags_ = np.hstack((DS_obj.tags_,DS_obj.ap_tags_))
             else:
                 raise Exception('data_select mode invalid')
+                
         if isinstance(DS_obj,dtsp.EISdataset):
             self.data_type_ = 'EIS'
         elif isinstance(DS_obj,dtsp.DRTdataset):
             self.data_type_ = 'DRT'
         else:
             self.data_type_ = 'custom'
-        
         self.params_ = DS_obj.params_var_
         self.params_names_ = DS_obj.params_names_
         self.params_units_ = DS_obj.params_units_
-        self.circuitID_ = DS_obj.circuitID_
+        self.dsID_ = DS_obj.dsID_
         self.contains_data_ = True
         self.data_selection_ = data_select
         self.dataname_ = DS_obj.name_
@@ -454,7 +462,7 @@ class ModelDS():
         if not self.contains_data_:
             raise Exception('Data not loaded into model')
         self.Z_train_, self.Z_test_, self.p_train_, self.p_test_, self.ID_train_, self.ID_test_ = train_test_split(
-            self.Z_,self.params_,self.circuitID_,test_size=test_size,random_state=random_state
+            self.Z_,self.params_,self.dsID_,test_size=test_size,random_state=random_state
         )
         self.is_split_ = True
     
@@ -464,7 +472,7 @@ class ModelDS():
         Zre, Zim, Zadd = self.split_re_im(return_separate=True)
         Zadd = Zadd.astype(float)
         Zre_train, Zre_test, Zim_train, Zim_test, Zadd_train, Zadd_test, self.p_train_, self.p_test_, self.ID_train_, self.ID_test_ = train_test_split(
-            Zre, Zim, Zadd, self.params_, self.circuitID_,test_size=test_size,random_state=random_state    
+            Zre, Zim, Zadd, self.params_, self.dsID_,test_size=test_size,random_state=random_state    
         )
         Z_train = Zre_train + Zim_train*1j
         Z_test = Zre_test + Zim_test*1j
