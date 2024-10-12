@@ -170,8 +170,11 @@ class DS():
 
 '''
 ======================================
-EIS dataset Class, with built-in parameter estimation 
-and variation generation functions.
+EIS dataset class, primarily used to store raw EIS data,
+generate varied datasets, and perform data analysis.
+    subclasses:
+EISC: Equivalent circuit-based processing
+EISP: Physical model-based processing
 ======================================
 '''
 
@@ -201,6 +204,8 @@ class EISdataset(DS):
         self.ap_ = None
         self.ap_tags_ = None
     
+    '''
+    NEEDS RETOOLING
     # change to class method!
     def from_npy(self,featurepath,targetpath, f_gen, additional_params = 0):
         Z = np.load(featurepath)
@@ -224,7 +229,18 @@ class EISdataset(DS):
         self.f_gen_ = f_gen
         self.source_ = 'npy file'
         self.tags_ = np.char.mod('%.2e', f_gen)
-        
+    '''
+    
+    def separate_real_imag(self):
+        # Maybe delete this
+        Z_re = np.real(self.Z_var_)
+        Z_im = np.imag(self.Z_var_)
+        return Z_re, Z_im
+
+class EISCdataset(EISdataset):
+    def __init__(self, path, dataset_name, from_files = True):
+        super().__init__(path, dataset_name, from_files)
+    
     def get_circuit_parameters(self, circuit_string, parameter_guess, f_gen = np.logspace(5,-1,61), global_optimization=False,
                                plot=True, save_figure=False, linKK=True,
                                ignore_negative_data=False, validate=True, weight_by_modulus=True, verbose=True,
@@ -461,8 +477,8 @@ class EISdataset(DS):
             self.Z_var_[:ndata,:] = 0
         self.params_var_ = np.empty((nvar+ndata,nparams))
         self.params_var_[:ndata,:] = self.params_
-        self.circuitID_ = np.empty((nvar+ndata,1))
-        self.circuitID_[:ndata] = np.arange(0,ndata,1).reshape(-1,1)
+        self.dsID_ = np.empty((nvar+ndata,1))
+        self.dsID_[:ndata] = np.arange(0,ndata,1).reshape(-1,1)
         
         total_var = ndata
         if var_type == 'dataset':
@@ -534,7 +550,7 @@ class EISdataset(DS):
                 else:
                     self.Z_var_[total_var,:] = self.Z_basefit_[c,:] - var_circuit.predict(self.f_gen_)
                 self.params_var_[total_var,:] = var_params_c[current_var]
-                self.circuitID_[total_var] = c
+                self.dsID_[total_var] = c
                 current_var += 1
                 total_var += 1
             if verbose:
@@ -544,24 +560,28 @@ class EISdataset(DS):
             print('Random variation complete!')
         self.source_ = 'generated' 
 
-    def separate_real_imag(self):
-        # Maybe delete this
-        Z_re = np.real(self.Z_var_)
-        Z_im = np.imag(self.Z_var_)
-        return Z_re, Z_im
+class EISPdataset(EISdataset):
+    def __init__(self,name):
+        super().__init__(path='',dataset_name=name,from_files=False)
+        self.contains_data_ = False
     
-
+    '''
+    TO DO:
+        1. Parameter regression to fit model to experimental data
+        2. Comparison of multiple physical models for goodness of fit?
+        3. 
+    '''
+    
 '''
 ======================================
 DRT dataset Class, with built-in function to 
 transform EIS data into equivalent DRT spectra.
 ======================================
-'''
-        
+''' 
 class DRTdataset(DS):
     def __init__(self,EISdata):
         self.f_gen_ = EISdata.f_gen_
-        self.circuitID_ = EISdata.circuitID_
+        self.dsID_ = EISdata.dsID_
         self.params_var_ = EISdata.params_var_
         self.params_names_ = EISdata.params_names_
         self.params_units_ = EISdata.params_units_
@@ -580,7 +600,7 @@ class DRTdataset(DS):
         ----------
         EISdata : EISdataset
             EIS data to be transformed (specifically, EISdata.Z_var_ is transformed).
-            Transformation on baseline data will be implemented in the future.
+            Transformation on only baseline data will be implemented in the future.
         fine : bool, optional
             By default, the pyDRTtools transform returns 10*(number of frequencies) tau and gamma values.
             If True, save all values generated. If False, save (number of frequencies) instead. 
@@ -697,7 +717,6 @@ class DRTdataset(DS):
             self.ap_ = np.hstack((self.ap_,peakdata))
             self.ap_tags_ = np.hstack((self.ap_tags_,tags))
     
-    
 '''
 ======================================
 Transformer class, subclasseed to store custom
@@ -706,7 +725,7 @@ user parameter transformations.
 '''
 class Transformer():
     '''
-    I'm working on making proper documentation for usage here.
+    I'm working on making proper documentation for usage.
     The gist, for now, is that users should make a subclass containing the following:
         1. transform(self,params) that transforms parameters and returns new p, names, and units as lists
         2. (optional) inv_transform(self,params) that reverses transform()
@@ -760,3 +779,103 @@ class omega_transform(Transformer):
         else:
             raise Exception('Please return a list for the transformed parameters')
         Dataset_obj.params_var_ = p
+
+'''
+======================================
+Physical model class. Subclassed by user to store transformation function,
+and provides the ability to generate datasets from a set of variables and
+constants. Like Transformer(), I'm working on some more rigorous documentation (for everything, incl. this).
+Users should provide the following:
+    1. __init__ that calls super() with the 4 args provided in the example below
+    2. ptransform(omega, variables, constants) function
+        a. Defines the impedance returned from a set of variables and constants
+        b. Variables: Can be changed within a dataset during variation.
+        c. Constants: Must be changed BETWEEN variation datasets, if at all.
+
+    Example below:
+    -----------------
+class Covered_Electrode(PhysicalModel):
+    def __init__(self, name, variable_names = None, constant_names = None, variable_units = None, constant_units = None):
+        super().__init__(name, variable_names, constant_names, variable_units, constant_units)
+    
+    def ptransform(omega, variables, constants):
+        # This sort of explicit redefining is probably helpful s.t. users don't lose track of what each column is.
+        Re = constants[0] # Resistance of the electrolyte
+        Cdl = constants[1] # Double layer capacitance
+        Cl = constants[2] # Capacitance of blocking layer
+        Zf = constants[3] # Faradaic impedance (here, treated as a charge transfer resistance)
+        gamma = variables[0] # Fraction of electrode covered in blocking layer
+        
+        # Main transformation
+        Z = Re + Zf/(1 - gamma + 1j*omega*(gamma*Cl + (1-gamma)*Cdl)*Zf)
+        return Z
+    -----------------
+Example is based on a very simplified model of a partially blocked electrode.
+See: Electrochemical Impedance Spectroscopy, 2nd ed. by Orazem and Tribollet
+======================================
+'''
+class PhysicalModel():
+    def __init__(self, name, variable_names, constant_names, variable_units, constant_units):
+        self.name_ = name
+        self.variable_names_ = variable_names
+        self.constant_names_ = constant_names
+        self.variable_units_ = variable_units
+        self.constant_units_ = constant_units
+        self.ID_tracker_ = 0
+        
+    def Z_gen(self, frequencies, variables, constants, EISP_obj = None, n_sets = 1000):
+        if isinstance(frequencies,(list,float,int)):
+            frequencies = np.array(frequencies)
+        elif not isinstance(frequencies,np.ndarray):
+            raise Exception('Valid frequency input types: array or list')
+        if isinstance(variables,(list,float,int)):
+            variables = np.array(variables)
+        elif not isinstance(variables,np.ndarray):
+            raise Exception('Valid variable input types: array, list, int, or float')
+        if isinstance(constants,(list,float,int)):
+            constants = np.array(constants)
+        elif not isinstance(constants,np.ndarray):
+            raise Exception('Valid constant input types: array, list, int, or float')
+        if EISP_obj is not None and not isinstance(EISP_obj,EISPdataset):
+            raise Exception('EISP_obj must be an EISPdataset() object')
+            
+        if any(isinstance(x, (float,int)) for x in variables):
+            nvar = np.size(variables,axis=0)
+            explicit_gen = True
+        if any(isinstance(x, tuple) for x in variables):
+            if np.size(variables,axis=0) > 1:
+                raise Exception('When passing tuples, only 1 set of (lb,ub) is accepted. Size in axis=0 is {}'.format(np.size(variables,axis=0)))
+            nvar = n_sets
+            nfreq = np.size(frequencies)
+            lb = np.array([l[0] for l in variables])
+            ub = np.array([u[1] for u in variables])
+            gen = np.random.Generator(np.random.PCG64())
+            gen_vars = gen.uniform(lb,ub,size=(nvar,np.size(variables,axis=1)))
+            explicit_gen = False
+        if EISP_obj is None:
+            EISP = EISPdataset(self.name_)
+            
+        Z = np.empty((nvar,nfreq))
+        for n in range(nvar):
+            if explicit_gen:
+                Z[n,:] = self.transform(frequencies*2*np.pi,variables[n,:],constants)
+            else:
+                Z[n,:] = self.transform(frequencies*2*np.pi,gen_vars[n,:],constants)
+        
+        ID = np.full((nvar,1),self.ID_tracker_)
+        if not EISP.contains_data_:
+            EISP.params_var_ = Z
+            EISP.dsID_ = ID
+            EISP.params_names_ = self.variable_names_
+            EISP.params_units_ = self.variable_units_
+            EISP.constant_names_ = self.constant_names_
+            EISP.constant_units_ = self.constant_units_
+            EISP.constants_ = constants
+        else:
+            EISP.params_var_ = np.vstack((EISP.params_var_,Z))
+            EISP.dsID_ = np.vstack((EISP.dsID_,ID))
+            EISP.constants_ = np.vstack((EISP.constants_,constants)) # Only store 1 version of constants, which corresponds to data through dsID_
+
+        self.ID_tracker_ += 1
+        if EISP_obj is None:
+            return EISP
