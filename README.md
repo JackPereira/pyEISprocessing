@@ -44,3 +44,5 @@ There is no formal documentation yet. Once I get closer towards a v1.0 of this p
 - DRT processing remains computationally expensive. Currently, it's using (mostly) unmodified pyDRTtools functions to transform each spectrum. It may be possible that parts of this pipeline are extraneous to our needs here.
 - Machine learning only supports a few scikit-learn models. In addition, it doesn't support classification yet. This is because my personal work has focused on regression, but classification will be supported soon.
 - Other things that I don't want to list because I'm already working on them :)
+## Get Involved
+If this sounds cool and you'd like to get involved in development, please reach out at pereirajack2020@gmail.com. I don't know how you found this page (unless I shared it with you explicitly) but thanks for visiting!
