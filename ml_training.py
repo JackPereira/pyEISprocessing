@@ -4,19 +4,23 @@ Department of Chemical Engineering
 University of Washington
 2024
 '''
+import warnings
 import numpy as np
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+
 import dataset_processing as dtsp
 import pytorch_integration as pyti
 import plotgen
 from analysis import complex_to_polar
 from analysis import polar_to_complex
-import warnings
 
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MaxAbsScaler
 from sklearn import metrics
 from sklearn.neural_network import MLPRegressor
 from sklearn.neural_network import MLPClassifier
+from sklearn.base import is_classifier
+from sklearn.base import is_regressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.ensemble import RandomForestClassifier
 
@@ -32,18 +36,16 @@ pyTorch preprocessing and training
 ======================================
 '''
 
-def pyt_preprocess_and_train(ModelDS_obj, DS_obj, name=None, cast_as_complex = False, scale_data=True, learning_rate = 1e-3, epochs=50, batch_size=100, 
-                             dynamic_lr = False, scoring=True, plotting=False,savefig=True,savepath='',verbose=True,**kwargs):
-    if ModelDS_obj.model_type_ != 'pyTorch Module':
-        raise Exception('pytorch_train can only be used on pyTorch neural networks (subclasses of nn.Module)')
-    
+def pyt_preprocess(ModelDS_obj, DS_obj, name=None, cast_as_complex = False, test_size=0.2,
+                   scale_data=True,scaler=MaxAbsScaler(),verbose=True,**kwargs):
+    if not ModelDS_obj.pytorch_:
+        raise Exception('pyt_preprocess can only be used on pyTorch neural networks (subclasses of nn.Module)')
     data_select = kwargs.get('data_select','all')
     ModelDS_obj.load_data(DS_obj,data_select=data_select)
     if verbose:
         print('Data loaded\n-------------')
-    test_size = kwargs.get('test_size',0.2)
-    
     random_state = kwargs.get('random_state',None)
+    
     if cast_as_complex: 
     # Complex support should be treated as a beta feature, as it is in pyTorch.
     # While the functionality is implemented here, and it works with certain custom Modules I've written,
@@ -52,33 +54,28 @@ def pyt_preprocess_and_train(ModelDS_obj, DS_obj, name=None, cast_as_complex = F
     # as it's essentially unnecessary data loss when compared to split Re/Im float representations)
     # See: https://pytorch.org/docs/stable/complex_numbers.html
         ModelDS_obj.is_complex_ = True
-        ModelDS_obj.pyt_train_test_split(test_size=test_size,random_state=random_state)
+        ModelDS_obj.pyt_train_test_split(test_size,random_state=random_state)
         if verbose:
             print('Data split into train/test sets\nTest size = {:.1%}\n-------------'.format(test_size))
         if scale_data:
-            scaler = kwargs.get('scaler',MaxAbsScaler())
-            ModelDS_obj.pyt_scale_data(scaler=scaler)
+            ModelDS_obj.pyt_scale_data(scaler)
             if verbose:
                 print('Data scaled\n-------------')
+                
     else:
         ModelDS_obj.is_complex_ = False
         ModelDS_obj.split_re_im()
-        ModelDS_obj.train_test_split(test_size=test_size,random_state=random_state)
+        ModelDS_obj.train_test_split(test_size,random_state=random_state)
         if verbose:
             print('Data split into train/test sets\nTest size = {:.1%}\n-------------'.format(test_size))
         if scale_data:
-            scaler = kwargs.get('scaler',MaxAbsScaler())
-            ModelDS_obj.scale_data(scaler=scaler)
+            ModelDS_obj.scale_data(scaler)
             if verbose:
                 print('Data scaled\n-------------')
-    if verbose:
-        print('Training model\n-------------')
-    pyt_train(ModelDS_obj,learning_rate=learning_rate,epochs=epochs,dynamic_lr=dynamic_lr,batch_size=batch_size,
-              scoring=scoring,plotting=plotting,verbose=verbose,**kwargs)
     
 def pyt_train(ModelDS_obj,learning_rate = 1e-3, epochs=50, batch_size=100,
               dynamic_lr=False, dlr_epoch= 30, dlr_scheduler='exp',
-              scoring=True, plotting=False,verbose=True,**kwargs):
+              scoring=True, score_method = 'default', plotting=False,verbose=True,**kwargs):
     '''
     TO DO:
         1. Handle different optimizers:
@@ -124,8 +121,10 @@ def pyt_train(ModelDS_obj,learning_rate = 1e-3, epochs=50, batch_size=100,
     None.
 
     '''
-    if ModelDS_obj.model_type_ != 'pyTorch Module':
-        raise Exception('pytorch_train can only be used on pyTorch neural networks (subclasses of nn.Module)')
+    if not ModelDS_obj.pytorch_:
+        raise Exception('pyt_train can only be used on pyTorch neural networks (subclasses of nn.Module)')
+    if verbose:
+        print('Training model\n-------------')
     if ModelDS_obj.is_complex_:
         dtypes = torch.cfloat
     else:
@@ -226,11 +225,21 @@ def pyt_train(ModelDS_obj,learning_rate = 1e-3, epochs=50, batch_size=100,
     ModelDS_obj.loss_ = allloss
     
     if scoring:
-        get_scores(ModelDS_obj,verbose=verbose)
+        get_scores(ModelDS_obj,score_method,verbose)
     if plotting:
         titles = kwargs.get('titles',ModelDS_obj.params_names_)
         axes_units = kwargs.get('axes_units',ModelDS_obj.params_units_)
         plotgen.plot_results(titles,axes_units,ModelDS_obj.p_test_,ModelDS_obj.p_test_pred_,ModelDS_obj.name_,ModelDS_obj.dataname_)
+
+def pyt_preprocess_and_train(ModelDS_obj, DS_obj, name=None, cast_as_complex = False, test_size=0.2, scale_data=True, 
+                             learning_rate = 1e-3, epochs=50, batch_size=100, dynamic_lr = False, scoring=True, 
+                             scoring_method='default',plotting=False,savefig=True,savepath='',verbose=True,**kwargs):
+    if not ModelDS_obj.pytorch_:
+        raise Exception('pyt_preprocess_and_train can only be used on pyTorch neural networks (subclasses of nn.Module)')
+    
+    pyt_preprocess(ModelDS_obj, DS_obj, name, cast_as_complex,test_size,scale_data,verbose=verbose,**kwargs)
+    pyt_train(ModelDS_obj,learning_rate=learning_rate,epochs=epochs,dynamic_lr=dynamic_lr,batch_size=batch_size,
+              scoring=scoring,scoring_method=scoring_method,plotting=plotting,verbose=verbose,**kwargs)
 
 '''
 ======================================
@@ -238,33 +247,27 @@ Scikit-learn preprocessing and training
 ======================================
 '''
 
-def preprocess_and_train(ModelDS_obj, DS_obj, name=None, scoring=True, plotting=False,
-                         savefig=True,savepath='',verbose=True,**kwargs):
-    if ModelDS_obj.model_type_ != 'Random Forest' and  ModelDS_obj.model_type_ != 'Multi-layer Perceptron':
-        raise Exception('preprocess_and_train() only valid for sk-learn models. Currently supported: Random Forest, Multi-layer Perceptron')
-    
+def preprocess(ModelDS_obj, DS_obj, name=None,test_size=0.2,scale_data=True,scaler=MaxAbsScaler(),
+               verbose=True,**kwargs):
+    if ModelDS_obj.pytorch_:
+        raise Exception('For pyTorch modules, use pyt_preprocess')
     data_select = kwargs.get('data_select','all')
     ModelDS_obj.load_data(DS_obj,data_select=data_select)
     ModelDS_obj.split_re_im()
     if verbose:
         print('Data loaded and split into real and imaginary components\n-------------')
-    test_size = kwargs.get('test_size',0.2)
     random_state = kwargs.get('random_state',None)
-    ModelDS_obj.train_test_split(test_size=test_size,random_state=random_state)
+    ModelDS_obj.train_test_split(test_size,random_state=random_state)
     if verbose:
         print('Data split into train/test sets\nTest size = {:.1%}\n-------------'.format(test_size))
-    
-    scaler = kwargs.get('scaler',MaxAbsScaler())
-    ModelDS_obj.scale_data(scaler=scaler)
+    ModelDS_obj.scale_data(scaler)
     if verbose:
         print('Data scaled\n-------------')
-        print('Training model\n-------------')
-    train(ModelDS_obj,scoring=scoring,plotting=plotting,verbose=verbose)
-        
-def train(ModelDS_obj,scoring=True,plotting=False,verbose=True,**kwargs):
-    if ModelDS_obj.model_type_ != 'Random Forest' and  ModelDS_obj.model_type_ != 'Multi-layer Perceptron':
-        raise Exception('train() only valid for sk-learn models. Currently supported: Random Forest, Multi-layer Perceptron')
-    
+       
+def train(ModelDS_obj,score_method='default',plotting=False,verbose=True,**kwargs):
+    if ModelDS_obj.pytorch_:
+        raise Exception('For pyTorch modules, use pyt_preprocess_and_train')
+            
     Z_train, Z_test, p_train = ModelDS_obj.Z_train_, ModelDS_obj.Z_test_, ModelDS_obj.p_train_
     ModelDS_obj.model_.fit(Z_train, p_train)
     p_train_pred = ModelDS_obj.model_.predict(Z_train)
@@ -272,23 +275,46 @@ def train(ModelDS_obj,scoring=True,plotting=False,verbose=True,**kwargs):
     ModelDS_obj.p_train_pred_ = p_train_pred
     ModelDS_obj.p_test_pred_ = p_test_pred
     
-    if scoring:
-        get_scores(ModelDS_obj,verbose=verbose)
+    if score_method is not None:
+        get_scores(ModelDS_obj,score_method,verbose)
     if plotting:
         titles = kwargs.get('titles',ModelDS_obj.params_names_)
         axes_units = kwargs.get('axes_units',ModelDS_obj.params_units_)
         plotgen.plot_results(titles,axes_units,ModelDS_obj.p_test_,ModelDS_obj.p_test_pred_,ModelDS_obj.name_,ModelDS_obj.dataname_)
+
+def preprocess_and_train(ModelDS_obj, DS_obj, name=None, test_size=0.2,scale_data=True, scaler=MaxAbsScaler(),
+                         score_method = 'default', plotting=False,savefig=True,savepath='',verbose=True,**kwargs):
+    if ModelDS_obj.pytorch_:
+        raise Exception('For pyTorch modules, use pyt_preprocess_and_train')  
+    preprocess(ModelDS_obj, DS_obj, name, test_size,scale_data,scaler,verbose=verbose,**kwargs)
+    train(ModelDS_obj,score_method,plotting,verbose,**kwargs)
+    if score_method is not None:
+        get_scores(ModelDS_obj,score_method,verbose,**kwargs)
         
-def get_scores(ModelDS_obj,verbose=True):
-    # ONLY WORKS FOR REGRESSORS REALLY
-    r2_test = metrics.r2_score(ModelDS_obj.p_test_,ModelDS_obj.p_test_pred_,multioutput='raw_values')
-    r2_train = metrics.r2_score(ModelDS_obj.p_train_,ModelDS_obj.p_train_pred_,multioutput='raw_values')
-    rmse_test = metrics.root_mean_squared_error(ModelDS_obj.p_test_,ModelDS_obj.p_test_pred_,multioutput='raw_values')
-    rmse_train = metrics.root_mean_squared_error(ModelDS_obj.p_train_,ModelDS_obj.p_train_pred_,multioutput='raw_values')
-    if verbose:
-        for x in range(np.size(r2_test)):
-            print('{}:\nR2 test: {:.3f}\nR2 train: {:.3f}\nRMSE test: {:.2e}\nRMSE train{:.2e}\n-------------'.format(ModelDS_obj.params_names_[x],r2_test[x],r2_train[x],rmse_test[x],rmse_train[x]))
-    ModelDS_obj.r2_test_, ModelDS_obj.r2_train_, ModelDS_obj.rmse_test_, ModelDS_obj.rmse_train_ = r2_test, r2_train, rmse_test, rmse_train
+def get_scores(ModelDS_obj,score_method = 'default', verbose=True,**kwargs):
+    # Classifier scoring
+    if ModelDS_obj.model_type_ == 'classifier':
+        if score_method == 'default':
+            score_method = 'accuracy'
+        if score_method == 'accuracy':
+            train_score = metrics.accuracy_score(ModelDS_obj.p_train_, ModelDS_obj.p_trian_pred_)
+            test_score = metrics.accuracy_score(ModelDS_obj.p_test_, ModelDS_obj.p_test_pred_)
+        else:
+            raise NotImplementedError('Other metrics will be implemented later')
+    # Regressor scoring
+    elif ModelDS_obj.model_type_ == 'regressor':
+        if score_method == 'default':
+            score_method = 'r2'
+        if score_method == 'r2':
+            train_score = metrics.r2_score(ModelDS_obj.p_train_, ModelDS_obj.p_trian_pred_)
+            test_score = metrics.r2_score(ModelDS_obj.p_test_, ModelDS_obj.p_test_pred_)
+        if score_method == 'rmse':
+            train_score = metrics.root_mean_squared_error(ModelDS_obj.p_train_, ModelDS_obj.p_trian_pred_)
+            test_score = metrics.root_mean_squared_error(ModelDS_obj.p_test_, ModelDS_obj.p_test_pred_)
+        else:
+            raise NotImplementedError('Other metrics will be implemented later')
+    ModelDS_obj.train_score_ = train_score
+    ModelDS_obj.test_score_ = test_score
 
 '''
 ======================================
@@ -296,26 +322,29 @@ Combined model-dataset class used as the basis of storing,
 training, and evaluating model-dataset pairs.
 ======================================
 '''
-    
+
 class ModelDS():
-    '''
-    TO DO:
-        1. Figure out how to dynamically find the model type and create self.model_type variable from that
-    '''
-    def __init__(self, model, name=None):
-        if isinstance(model,RandomForestRegressor) or isinstance(model,RandomForestClassifier):
-            self.model_type_ = 'Random Forest'
-        elif isinstance(model,MLPRegressor) or isinstance(model,MLPClassifier):
-            self.model_type_ = 'Multi-layer Perceptron'
-        elif isinstance(model, nn.Module):
-            self.model_type_ = 'pyTorch Module'
+    def __init__(self, model, pyt_mode = 'regression', name=None):
+        if isinstance(model, nn.Module):
+            self.pytorch_ = True
+            if pyt_mode == 'regression':
+                self.model_type_ = 'regressor'
+            elif pyt_mode == 'classification':
+                self.model_type_ = 'classifier'
+            else:
+                raise Exception('Invalid pyt_mode input. Valid inputs: regression; classification')
+        elif is_classifier(model):
+            self.model_type_ = 'classifier'
+            self.pytorch_ = False
+        elif is_regressor(model):
+            self.model_type_ = 'regressor'
+            self.pytorch_ = False
         else:
-            raise NotImplementedError('Custom models not supported yet :(')
+            raise NotImplementedError('Custom models not supported yet. Please pass an sklearn or pyTorch model')
         if name is None:
             self.name_ = self.model_type_
         else:
             self.name_ = name
-    
         self.model_ = model
         self.contains_data_ = False
         self.is_split_ = False
@@ -339,7 +368,6 @@ class ModelDS():
         self.model_ = model
     
     def load_data(self,DS_obj, data_select = 'all'):
-
         if isinstance(DS_obj,dtsp.DS):
             if self.contains_data_:
                 raise Exception('Data already found; run Model.clear_data before loading again')
@@ -441,6 +469,21 @@ class ModelDS():
             else:
                 return Zre, Zim, Zadd
     
+    def correlation(self):
+        if not self.contains_data_:
+            raise Exception('No data detected in model')
+        Zcov = self.Z_.copy()
+        Zcov = pyti.tensor_transform(np.transpose(Zcov))
+        return np.transpose(torch.corrcoef(Zcov).numpy(force=True))
+    
+    def vif(self):
+        if not self.contains_data_:
+            raise Exception('No data detected in  model')
+        vif = []
+        for i,_ in enumerate(self.Z_[0,:]):
+            vif.append(variance_inflation_factor(self.Z_,i))
+        return np.array(vif)
+    
     def train_test_split(self, test_size=0.2, random_state=None):
         '''
         TO DO:
@@ -498,7 +541,7 @@ class ModelDS():
                 self.Z_test_ = scaler.transform(self.Z_test_)
             else:
                 if not ignore_infoleak:
-                    raise Exception('Data not split into train and test sets. Scaling before splitting leaDS_obj to infoleak between sets. Set ignore_infoleak = True to proceed')
+                    raise Exception('Data not split into train and test sets. Scaling before splitting causes infoleak between sets. Set ignore_infoleak = True to proceed')
                 else:
                     self.Z0_ = self.Z_.copy()
                     self.Z_ = scaler.fit_transform(self.Z_)
