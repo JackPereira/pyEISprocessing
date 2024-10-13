@@ -83,14 +83,8 @@ def pyt_train(ModelDS_obj,learning_rate = 1e-3, epochs=50, batch_size=100,
             as it would be initialized before the model is sent to device.
             1b. https://discuss.pytorch.org/t/should-i-create-optimizer-after-sending-the-model-to-gpu/133418
             It may be possible? NeeDS_obj testing
-        2.  [DONE] Handle different loss functions:
-            2a. Should be relatively simple, as these can get passed explicitly and
-            then sent to device.
-            2b. BASE CLASS: _Loss(Module)
-        3.  Handle schedulers better:
-            3a. Users should be able to specify period of non-dynamic LR and switch to
-            dynamic after t epochs.
-            3b. Users should be able to pass any arbitrary scheduler
+        2.  Handle schedulers better:
+            3a. Users should be able to pass any arbitrary scheduler
 
     Parameters
     ----------
@@ -217,6 +211,7 @@ def pyt_train(ModelDS_obj,learning_rate = 1e-3, epochs=50, batch_size=100,
     p_train_pred = model(torch.from_numpy(ModelDS_obj.Z_train_).to(device,dtype=dtypes))
     p_train_pred = p_train_pred.detach().cpu().numpy()
     
+    ModelDS.model_.load_state_dict(model.state_dict())
     ModelDS_obj.p_test_pred_ = p_test_pred
     ModelDS_obj.p_train_pred_ = p_train_pred
     del p_test_pred
@@ -352,15 +347,15 @@ class ModelDS():
         self.is_preprocessed_ = False
         self.is_trained_ = False
     
-    def swap_model(self,model,name=None):
-        if isinstance(model,RandomForestRegressor) or isinstance(model,RandomForestClassifier):
-            self.model_type_ = 'Random Forest'
-        elif isinstance(model,MLPRegressor) or isinstance(model,MLPClassifier):
-            self.model_type_ = 'Multi-layer Perceptron'
-        elif isinstance(model, nn.Module):
-            self.model_type_ = 'pyTorch Module'
-        else:
-            raise NotImplementedError('Custom models not supported yet :(')
+    def swap_model(self,model,pyt_mode = 'regression',name=None):
+        if isinstance(model, nn.Module):
+            self.pytorch_ = True
+            if pyt_mode == 'regression':
+                self.model_type_ = 'regressor'
+            elif pyt_mode == 'classification':
+                self.model_type_ = 'classifier'
+            else:
+                raise Exception('Invalid pyt_mode input. Valid inputs: regression; classification')
         if name is None:
             self.name_ = self.model_type_
         else:
