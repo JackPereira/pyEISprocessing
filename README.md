@@ -1,6 +1,6 @@
 # pyEISprocessing
 Hi there! pyEISprocessing is a WIP open source project designed to fill the gap in large-scale electrochemical impedance spectroscopy (EIS) processing and dataset generation packages. 
-- Packages such as impedance.py and pyDRTtools are excellent tools for investigating a small number of impedance datasets.This project extends their functionality to provide easier analysis of large datasets.
+- Packages such as impedance.py and pyDRTtools are excellent tools for investigating a small number of impedance datasets. This project extends their functionality to provide easier analysis of large datasets.
 - As impedance experiments can be time- or cost-prohibitive, it may be of interest to generate non-experimental data from physical models or equivalent circuits to investigate an electrochemical system. To this end, functions are provided for developing large datasets across multivariate spaces.
 - Finally, pyEISprocessing integrates scikit-learn and pyTorch to provide access to machine learning tools; pre-built functions allow for easy, modular access to preprocessing and training.
 ## Documentation
