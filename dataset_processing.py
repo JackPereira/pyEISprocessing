@@ -18,8 +18,11 @@ from impedance.models.circuits import CustomCircuit
 from impedance.visualization import plot_nyquist
 from impedance import validation
 from sklearn import metrics
+from sklearn import feature_selection
 import DRT_main as DRT
 import analysis
+import torch
+import pytorch_integration as pyti
 
 '''
 ======================================
@@ -232,11 +235,120 @@ class EISdataset(DS):
     '''
     
     def separate_real_imag(self):
+        '''
+        Separates the real and imaginary components of Z.
+
+        Returns
+        -------
+        Z_re : np.ndarray
+            Real part of Z.
+        Z_im : np.ndarray
+            Imaginary part of Z.
+
+        '''
         # Maybe delete this
         Z_re = np.real(self.Z_var_)
         Z_im = np.imag(self.Z_var_)
         return Z_re, Z_im
+    
+    def corrcoef(self):
+        '''
+        Gets the correlation coefficient matrices for the real and imaginary components of Z
 
+        Returns
+        -------
+        corr_re : np.ndarray
+            Real correlation coefficient matrix.
+        corr_im : np.ndarray
+            Imaginary correlation coefficient matrix.
+            
+        '''
+        Zre, Zim = self.separate_real_imag()
+        Zre, Zim = pyti.tensor_transform(np.transpose(Zre)),pyti.tensor_transform(np.transpose(Zim))
+        corr_re, corr_im = np.transpose(torch.corrcoef(Zre).numpy(force=True)), np.transpose(torch.corrcoef(Zim).numpy(force=True))
+        return corr_re, corr_im
+    
+    def select_best_frequencies(self, mode='KBest',  scoring_mode='f_value', mode_val='default', p_weights = None, returns = True):
+        '''
+        Selects the best frequencies based on f_value or mutual info criteria. Weights
+        may be provided to 
+
+        Parameters
+        ----------
+        mode : str, optional
+            Mode of selection. Valid options are KBest (select k features) and Percentile (select fraction of total features)
+        scoring_mode : str, optional
+            Scoring method used to calculate best features. Valid options are f_value and mutual_info. 
+        mode_val : int, optional
+            Number of parameters to keep (KBest) or percent of features to keep (Percentile).
+            Defaults to k = 30 or percentile = 50
+        p_weights : list or np.ndarray, optional
+            Parameter weights that can be optionally applied during scoring.
+            Can be used to bias feature selection towards/away from a parameter.
+            Weights are used multiplicatively -> [score_weighted = score*weight]
+        returns : bool, optional
+            If True, return best Z and best f. If False, return nothing.
+
+        Returns
+        -------
+        Zbest : np.ndarray, complexfloating
+            Z_var_ truncated to best features.
+        freq_best : np.ndarray, floating
+            The frequencies corresponding to Zbest features.
+
+        '''
+        nfreq = len(self.f_gen_)
+        ids = np.arange(0,nfreq,1)
+        if p_weights is None:
+            p_weights = np.ones((np.size(self.params_var_,axis=1),1))
+        elif isinstance(p_weights,list):
+            p_weights = np.array(p_weights)
+        if np.size(p_weights) != np.size(self.params_var_,axis=1):
+            raise Exception('p_weights must have a length equal to the number of parameters')
+        Zre, Zim = self.separate_real_imag()
+        scores = np.zeros((np.size(self.Z_var_,axis=1),))
+        if scoring_mode == 'f_value':
+            score_func = feature_selection.f_regression
+        elif scoring_mode == 'mutual_info':
+            score_func = feature_selection.mutual_info_regression
+        
+        if mode == 'KBest':
+            if mode_val == 'default':
+                mode_val = 30
+            est = feature_selection.SelectKBest(score_func=score_func,k=mode_val)
+        elif mode == 'Percentile':
+            if mode_val == 'default':
+                mode_val = 50
+            est = feature_selection.SelectPercentile(score_func=score_func,percentile=mode_val)
+        
+        for i,w in enumerate(p_weights):
+            est.fit(Zre,self.params_var_[:,i])
+            sc = est.scores_
+            scores += sc/w
+            est.fit(Zim,self.params_var_[:,i])
+            scores += est.scores_*w
+        est.scores_ = scores
+        Zbest = est.transform(Zre)
+        Zbest_id = est.get_feature_names_out(input_features=ids).tolist()
+        Zbest = self.Z_var_[:,Zbest_id]
+        freq_best = self.f_gen_[Zbest_id]
+        self.best_ids_ = Zbest_id
+        if returns:
+            return Zbest, freq_best
+    
+    def truncate_to_best(self):
+        '''
+        Truncates stored data to best frequencies. Destructive to dataset; lost datapoints are
+        not saved. It is recommended to copy the dataset object or save a copy
+        prior to truncation if you want to preserve data.
+        
+        '''
+        if 'best_ids_' not in self.__dict__:
+            raise Exception('Best frequencies not found. Run [OBJ].select_best_frequencies() to access truncation.')
+        self.Z_var_ = self.Z_var_[:,self.best_ids_]
+        self.Z_basefit_ = self.Z_basefit_[:,self.best_ids_]
+        self.f_gen_ = self.f_gen_[self.best_ids_]
+        
 class EISCdataset(EISdataset):
     def __init__(self, path, dataset_name, from_files = True):
         super().__init__(path, dataset_name, from_files)
@@ -701,7 +813,7 @@ class DRTdataset(DS):
                 self.tau_ = self.tau_[::10]
                 self.DRTdata_ = self.DRTdata_[:,::10]
                 self.is_fine_ = True
-                
+    
     def peak_analysis(self, n_peaks, cutoff_frac = 0.1, get_gamma = True, get_tau = True, get_area = True,
                        verbose = True, der = 1):
         
@@ -716,7 +828,7 @@ class DRTdataset(DS):
                 raise Exception('Peak data already added')
             self.ap_ = np.hstack((self.ap_,peakdata))
             self.ap_tags_ = np.hstack((self.ap_tags_,tags))
-    
+
 '''
 ======================================
 Transformer class, subclasseed to store custom
@@ -786,7 +898,7 @@ Physical model class. Subclassed by user to store transformation function,
 and provides the ability to generate datasets from a set of variables and
 constants. Like Transformer(), I'm working on some more rigorous documentation (for everything, incl. this).
 Users should provide the following:
-    1. __init__ that calls super() with the 4 args provided in the example below
+    1. __init__ that calls super() with the 5 args provided in the example below
     2. ptransform(omega, variables, constants) function
         a. Defines the impedance returned from a set of variables and constants
         b. Variables: Can be changed within a dataset during variation.
@@ -794,7 +906,7 @@ Users should provide the following:
 
     Example below:
     -----------------
-class Covered_Electrode(PhysicalModel):
+class CoveredElectrode(PhysicalModel):
     def __init__(self, name, variable_names = None, constant_names = None, variable_units = None, constant_units = None):
         super().__init__(name, variable_names, constant_names, variable_units, constant_units)
     
@@ -803,8 +915,8 @@ class Covered_Electrode(PhysicalModel):
         Re = constants[0] # Resistance of the electrolyte
         Cdl = constants[1] # Double layer capacitance
         Cl = constants[2] # Capacitance of blocking layer
-        Zf = constants[3] # Faradaic impedance (here, treated as a charge transfer resistance)
-        gamma = variables[0] # Fraction of electrode covered in blocking layer
+        Zf = constants[3] # Faradaic impedance (here, treated as a constant charge transfer resistance)
+        gamma = variables[0] # Fraction of electrode covered by blocking layer
         
         # Main transformation
         Z = Re + Zf/(1 - gamma + 1j*omega*(gamma*Cl + (1-gamma)*Cdl)*Zf)
