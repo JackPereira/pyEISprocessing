@@ -268,7 +268,7 @@ class EISdataset(DS):
         corr_re, corr_im = np.transpose(torch.corrcoef(Zre).numpy(force=True)), np.transpose(torch.corrcoef(Zim).numpy(force=True))
         return corr_re, corr_im
     
-    def select_best_frequencies(self, mode='KBest',  scoring_mode='f_value', mode_val='default', p_weights = None, returns = True):
+    def select_best_frequencies(self, mode='KBest',  scoring_mode='f_value', mode_val='default', always_take_best=False, p_weights = None, returns = True):
         '''
         Selects the best frequencies based on f_value or mutual info criteria. Weights
         may be provided to 
@@ -282,6 +282,9 @@ class EISdataset(DS):
         mode_val : int, optional
             Number of parameters to keep (KBest) or percent of features to keep (Percentile).
             Defaults to k = 30 or percentile = 50
+        always_take_best: bool, optional
+            If True, always include the best predicting frequency for each target. These selections take priority
+            over other lumped scores.
         p_weights : list or np.ndarray, optional
             Parameter weights that can be optionally applied during scoring.
             Can be used to bias feature selection towards/away from a parameter.
@@ -311,7 +314,8 @@ class EISdataset(DS):
             score_func = feature_selection.f_regression
         elif scoring_mode == 'mutual_info':
             score_func = feature_selection.mutual_info_regression
-        
+        if always_take_best:
+            top_ids = []
         if mode == 'KBest':
             if mode_val == 'default':
                 mode_val = 30
@@ -323,10 +327,16 @@ class EISdataset(DS):
         
         for i,w in enumerate(p_weights):
             est.fit(Zre,self.params_var_[:,i])
-            sc = est.scores_
-            scores += sc/w
+            sc_re = est.scores_
             est.fit(Zim,self.params_var_[:,i])
-            scores += est.scores_*w
+            sc_im = est.scores_
+            if always_take_best:
+                maxid = np.argmax(sc_re+sc_im)
+                if maxid not in top_ids:
+                    top_ids.append(maxid)
+            scores += (sc_re+sc_im)/w
+        if always_take_best:
+            scores[top_ids] = np.max(scores+1) # Ensures top_id indicies are always selected first
         est.scores_ = scores
         Zbest = est.transform(Zre)
         Zbest_id = est.get_feature_names_out(input_features=ids).tolist()
@@ -502,40 +512,36 @@ class EISCdataset(EISdataset):
         scores = pd.DataFrame(data=scores,index=circuit_strings,columns=filenames)
         return scores
     
-    def generate_variation(self, nvar_per_circuit, var_bounds, random_gen = 'gaussian', bound_type='relative', var_type='per circuit',difference=False, verbose=True):
+    def uniform_variation(self, nvar_per_circuit, var_bounds, bound_type = 'relative', var_type = 'per circuit', difference=False,verbose=True):
         """
-        TO DO:
-            1. Check to make sure all self. parameters are updated
-            2. Handle other types of generation other than uniform
-
+    
         Parameters
         ----------
-        nvar_per_circuit : TYPE
-            DESCRIPTION.
-        var_bounds : TYPE
-            DESCRIPTION.
-        absolute_bounds : TYPE, optional
-            DESCRIPTION. The default is False.
-        var_type : TYPE, optional
-            DESCRIPTION. The default is 'uniform'.
-        difference : TYPE, optional
-            DESCRIPTION. The default is False.
-        verbose : TYPE, optional
-            DESCRIPTION. The default is True.
-
-        Raises
-        ------
-        Exception
-            DESCRIPTION.
-
-        Returns
-        -------
-        None.
-
+        nvar_per_circuit : int
+            Number of variations to generate per baseline circuit.
+        var_bounds : array-like of floats or array-like of tuples
+            Describes the bounds set for variation.
+            If relative bound_type, bounds are multiplied by baseline parameter. E.g., (0.8,1.2) would generate in the range [0.8*baseline,1.2*baseline]
+            If absolute, bounds describe the, well, absolute parameter values in already-present parameter units.
+            Interpreation for different inputs:
+                1. Single-indexed tuple array-like: [(l,u)]
+                    Bound is applied uniformly across all parameters and baseline sets
+                2. 1D array-like of tuples: [(l_1,u_1),(l_2,u_2),....,(l_n,u_n)]
+                    Different bounds are applied to each parameter, but remain uniform across baseline sets. Must be size n in axis=1, where n is number of parameters.
+                3. 2D array-like of tuples: [[(l_1,u_1),(l_2,u_2),....,(l_n,u_n)],[bounds_2],...[bounds_n]]
+                    Different bounds are applied to each parameter and baseline set. Must be size n in axis=1 and size of baseline sets in axis=0.
+        bound_type : 'relative' or 'absolute', optional
+            If 'absolute', uniform bounds are treated as absolute values. If 'relative', they are treated relative to baseline.
+        var_type : 'per circuit' or 'dataset', optional
+            If 'per circuit', generation is done on each baseline set individually. If 'dataset', relative bounds are set relative to maximum and minimums
+            for the entire dataset. Thus, variations always span the entire variable space.
+        difference : bool, optional
+            If True, Z arrays are returned as a difference from baseline Z. If False, return unaltered Z.
+        verbose : bool, optional
+            If True, print progress statements and descriptions of each baseline circuit.
         """
         if not self.is_fit_:
-            raise Exception('Dataset not fit to circuit parameters. Run object.get_circuit_parameters before generating variations.')
-            
+            raise Exception('Dataset not fit to circuit parameters. Run object.get_circuit_parameters before generating variations.')    
         nparams = np.size(self.params_,axis=1)
         ndata = len(self.files_)
         
@@ -546,10 +552,12 @@ class EISCdataset(EISdataset):
             single_bound = False
             uniform_bounds = False
             if bound_type == 'absolute':
-                if np.size(var_bounds,axis=1) != nparams or np.size(var_bounds,axis=0) != ndata:
-                    raise Exception('Variation bounds not properly set. See documentation for valid inputs.')
+                if np.size(var_bounds,axis=1) != nparams:
+                    raise Exception('var_bounds error: expected size {} in axis=1 but size is {}.'.format(nparams,np.size(var_bounds,axis=1)))
+                elif np.size(var_bounds,axis=0) != ndata:
+                    raise Exception('var_bounds error: expected size {} in axis=0 but size is {}'.format(ndata,np.size(var_bounds,axis=1)))
                 elif len(var_bounds) != nparams and len(var_bounds) != 1:
-                    raise Exception('Variation bounds not properly set. See documentation for valid inputs.')
+                    raise Exception('var_bounds error: expected len {} or len 1, but len is {}'.format(nparams,len(var_bounds)))
                 elif len(var_bounds) == nparams:
                     uniform_bounds = True
                 elif len(var_bounds) == 1:
@@ -558,25 +566,20 @@ class EISCdataset(EISdataset):
                     raise NotImplementedError('Complete definition of per-circuit + per-element bounds not implemented yet')
             elif bound_type == 'relative':
                 if len(var_bounds) != nparams and len(var_bounds) != 1:
-                    raise Exception('Variation bounds not properly set. See documentation for valid inputs.')
+                    raise Exception('var_bounds error: expected len {} or len 1, but len is {}'.format(nparams,len(var_bounds)))
                 elif len(var_bounds) == nparams:
                     uniform_bounds = True
                 elif len(var_bounds) == 1:
                     single_bound = True
             else:
-                raise Exception('Invalid bound_type entry')
+                raise Exception('Invalid bound_type entry. Valid inputs: relative or absolute')
         elif var_type == 'dataset':
             if bound_type == 'absolute':
                 if np.size(var_bounds) != nparams:
-                    raise Exception('Variation bounds not properly set. See documentation for valid inputs.')
-        if random_gen == 'gaussian' and var_type == 'dataset':
-            raise Exception('Gaussian variation is not available across the entire dataset. Set var_type to per_circuit.')
-        if verbose:
-            if difference:
-                print('Generating Z data with difference from baseline circuit adjustment\n=============')
-            else:
-                print('Generating Z data without difference from baseline adjustment\n=============')
-                
+                    raise Exception('var_bounds error: expected len {}, but len is {}'.format(nparams,np.size(var_bounds)))
+        else:
+            raise Exception('Invalid var_type entry. Valid inputs: per circuit or dataset')
+        
         gen = np.random.Generator(np.random.PCG64())
         var_circuit = CustomCircuit(circuit=self.circuit_string_, initial_guess=self.params_[0,:])
         nfreq = len(self.f_gen_)
@@ -614,45 +617,23 @@ class EISCdataset(EISdataset):
                 for p in range(nparams):
                     print('{} ({}): {:.3e}'.format(self.params_names_[p],self.params_units_[p],current_params[p]))
                 print('\n-------------')
-                
-            # Gaussian variation
-            if random_gen == 'gaussian':
-                if uniform_bounds or single_bound:
-                    var_std = var_bounds
-                else:
-                    var_std = var_bounds[c][:]
-                if bound_type == 'relative' and not single_bound:
-                    var_std *= current_params
-                var_params_c = np.empty((nvar_per_circuit,nparams))
-                for n in range(nparams):
-                    if bound_type == 'relative':
-                        if single_bound:
-                            var_params_c[:,n] = gen.normal(loc=current_params[n],scale=var_std*current_params[n],size=(nvar_per_circuit,))
-                        else:
-                            var_params_c[:,n] = gen.normal(loc=current_params[n],scale=var_std[n],size=(nvar_per_circuit,))
-                    else:
-                        if single_bound:
-                            var_params_c[:,n] = gen.normal(loc=current_params[n],scale=var_std,size=(nvar_per_circuit,))
-                        else:
-                            var_params_c[:,n] = gen.normal(loc=current_params[n],scale=var_std[n],size=(nvar_per_circuit,))
-                var_params_c[var_params_c < 0] = 1e-8 # Prevents negative values, which may be possible if std deviation is too large
+        
             # Uniform variation on a per-circuit basis
-            elif random_gen == 'uniform':
-                if var_type == 'per circuit':
-                    if bound_type == 'relative':
-                        if uniform_bounds:
-                            lowerbound = current_params*(var_bounds[:][0][0])
-                            upperbound = current_params*(var_bounds[:][0][1])
-                        elif single_bound:
-                            lowerbound = current_params*(var_bounds[0][0])
-                            upperbound = current_params*(var_bounds[0][1])
-                        else:
-                            lowerbound = current_params*(var_bounds[c][:][0])
-                            upperbound = current_params*(var_bounds[c][:][1])
+            if var_type == 'per circuit':
+                if bound_type == 'relative':
+                    if uniform_bounds:
+                        lowerbound = current_params*(var_bounds[:][0][0])
+                        upperbound = current_params*(var_bounds[:][0][1])
+                    elif single_bound:
+                        lowerbound = current_params*(var_bounds[0][0])
+                        upperbound = current_params*(var_bounds[0][1])
                     else:
-                        lowerbound = var_bounds[c][:][0]
-                        upperbound = var_bounds[c][:][1]
-                var_params_c = gen.uniform(lowerbound,upperbound,size=(nvar_per_circuit,nparams))   
+                        lowerbound = current_params*(var_bounds[c][:][0])
+                        upperbound = current_params*(var_bounds[c][:][1])
+                else:
+                    lowerbound = var_bounds[c][:][0]
+                    upperbound = var_bounds[c][:][1]
+            var_params_c = gen.uniform(lowerbound,upperbound,size=(nvar_per_circuit,nparams))   
             
             # Generating dataset for a single circuit
             while current_var < nvar_per_circuit:
@@ -666,8 +647,129 @@ class EISCdataset(EISdataset):
                 current_var += 1
                 total_var += 1
             if verbose:
-                print('Progress: [{}/{}]'.format(total_var,nvar+ndata))
+                print('Progress: [{}/{}]'.format(total_var,nvar+ndata))        
+        if verbose:
+            print('Random variation complete!')
+        self.source_ = 'generated' 
+        
+    def gaussian_variation(self, nvar_per_circuit, stddevs, bound_type='relative',difference=False,verbose=True):
+        """
+
+        Parameters
+        ----------
+        nvar_per_circuit : int
+            Number of variations to generate per baseline circuit.
+        var_bounds : array-like of floats or array-like of tuples
+            Describes the standard deviation for the Gaussian distribution.
+            If relative bound_type, the standard deviation is taken as a factor of parameter value. E.g, 0.2*(baseline parameter value).
+            If absolute, bounds describe absolute magnitude of the standard deviation.
+            Interpreation for different inputs:
+                1. Single-indexed float array-like: [s]
+                    Bound is applied uniformly across all parameters and baseline sets
+                2. 1D array-like of tuples: [(s_1),(s_2),....,(s_n)]
+                    Different bounds are applied to each parameter, but remain uniform across baseline sets. Must be size n in axis=1, where n is number of parameters.
+                3. 2D array-like of tuples: [[[(s_1),(s_2),....,(s_n)],[bounds_2],...[bounds_n]]
+                    Different bounds are applied to each parameter and baseline set. Must be size n in axis=1 and size of baseline sets in axis=0.
+        bound_type : 'relative' or 'absolute', optional
+            If 'absolute', uniform bounds are treated as absolute values. If 'relative', they are treated relative to baseline.
+        difference : bool, optional
+            If True, Z arrays are returned as a difference from baseline Z. If False, return unaltered Z.
+        verbose : bool, optional
+            If True, print progress statements and descriptions of each baseline circuit.
+        """
+        if not self.is_fit_:
+            raise Exception('Dataset not fit to circuit parameters. Run object.get_circuit_parameters before generating variations.')    
+        nparams = np.size(self.params_,axis=1)
+        ndata = len(self.files_)
+        
+        if isinstance(stddevs,list):
+            stddevs = np.array(stddevs)
+        # Scuffed var_type logic to ensure input is valid. I'll rework this at some point.
+        single_bound = False
+        uniform_bounds = False
+        if bound_type == 'absolute':
+            if np.size(stddevs,axis=1) != nparams:
+                raise Exception('stddevs error: expected size {} in axis=1 but size is {}.'.format(nparams,np.size(stddevs,axis=1)))
+            elif np.size(stddevs,axis=0) != ndata:
+                raise Exception('stddevs error: expected size {} in axis=0 but size is {}'.format(ndata,np.size(stddevs,axis=1)))
+            elif len(stddevs) != nparams and len(stddevs) != 1:
+                raise Exception('stddevs error: expected len {} or len 1, but len is {}'.format(nparams,len(stddevs)))
+            elif len(stddevs) == nparams:
+                uniform_bounds = True
+            elif len(stddevs) == 1:
+                single_bound = True
+            else:
+                raise NotImplementedError('Complete definition of per-circuit + per-element bounds not implemented yet')
+        elif bound_type == 'relative':
+            if len(stddevs) != nparams and len(stddevs) != 1:
+                raise Exception('stddevs error: expected len {} or len 1, but len is {}'.format(nparams,len(stddevs)))
+            elif len(stddevs) == nparams:
+                uniform_bounds = True
+            elif len(stddevs) == 1:
+                single_bound = True
+            
+        gen = np.random.Generator(np.random.PCG64())
+        var_circuit = CustomCircuit(circuit=self.circuit_string_, initial_guess=self.params_[0,:])
+        nfreq = len(self.f_gen_)
+        nvar = int(ndata*nvar_per_circuit)
+        
+        self.Z_var_ = np.empty((nvar+ndata,nfreq),dtype=complex)
+        if not difference:
+            self.Z_var_[:ndata,:] = self.Z_basefit_
+        else:
+            self.Z_var_[:ndata,:] = 0
+        self.params_var_ = np.empty((nvar+ndata,nparams))
+        self.params_var_[:ndata,:] = self.params_
+        self.dsID_ = np.empty((nvar+ndata,1))
+        self.dsID_[:ndata] = np.arange(0,ndata,1).reshape(-1,1)
+        total_var = ndata
                 
+        for c in range(ndata):
+            current_var = 0
+            current_params = self.params_[c,:]
+            if verbose:
+                if self.files_ != []:
+                    print('{} Base Parameters\n-------------'.format(self.files_[c]))
+                else:
+                    print('Circuit {} Base Parameters\n-------------'.format([c]))
+                for p in range(nparams):
+                    print('{} ({}): {:.3e}'.format(self.params_names_[p],self.params_units_[p],current_params[p]))
+                print('\n-------------')
+                
+            # Gaussian variation
+            if uniform_bounds or single_bound:
+                var_std = stddevs
+            else:
+                var_std = stddevs[c][:]
+            if bound_type == 'relative' and not single_bound:
+                var_std *= current_params
+            var_params_c = np.empty((nvar_per_circuit,nparams))
+            for n in range(nparams):
+                if bound_type == 'relative':
+                    if single_bound:
+                        var_params_c[:,n] = gen.normal(loc=current_params[n],scale=var_std*current_params[n],size=(nvar_per_circuit,))
+                    else:
+                        var_params_c[:,n] = gen.normal(loc=current_params[n],scale=var_std[n],size=(nvar_per_circuit,))
+                else:
+                    if single_bound:
+                        var_params_c[:,n] = gen.normal(loc=current_params[n],scale=var_std,size=(nvar_per_circuit,))
+                    else:
+                        var_params_c[:,n] = gen.normal(loc=current_params[n],scale=var_std[n],size=(nvar_per_circuit,))
+            var_params_c[var_params_c < 0] = 1e-8 # Prevents negative values, which may be possible if std deviation is too large
+        
+            # Generating dataset for a single circuit
+            while current_var < nvar_per_circuit:
+                var_circuit.parameters_ = var_params_c[current_var]
+                if not difference:
+                    self.Z_var_[total_var,:] = var_circuit.predict(self.f_gen_)
+                else:
+                    self.Z_var_[total_var,:] = self.Z_basefit_[c,:] - var_circuit.predict(self.f_gen_)
+                self.params_var_[total_var,:] = var_params_c[current_var]
+                self.dsID_[total_var] = c
+                current_var += 1
+                total_var += 1
+            if verbose:
+                print('Progress: [{}/{}]'.format(total_var,nvar+ndata))
         if verbose:
             print('Random variation complete!')
         self.source_ = 'generated' 
@@ -861,7 +963,7 @@ class omega_transform(Transformer):
 
         return params_trns, names_trns, units_trns
     
-    def inv_transform(self,params_constants=None):
+    def inv_transform(self,params,constants=None):
         rohm = params[:,0]
         r2 = params[:,1]
         rg = params[:,3]
@@ -891,7 +993,20 @@ class omega_transform(Transformer):
         else:
             raise Exception('Please return a list for the transformed parameters')
         Dataset_obj.params_var_ = p
-
+    
+    def inv_transform_ds(self, Dataset_obj, constants=None):
+        if constants is None:
+            p, Dataset_obj.params_names_, Dataset_obj.params_units_ = self.inv_transform(Dataset_obj.params_var_)
+        else:
+            p, Dataset_obj.params_names_, Dataset_obj.params_units_ = self.inv_transform(Dataset_obj.params_var_,constants)
+        if isinstance(p,list):
+            p = np.array(p)
+            np.hstack(p)
+            if np.size(p,axis=0) != np.size(Dataset_obj.params_var_,axis=0):
+                p = np.transpose(p)
+        else:
+            raise Exception('Please return a list for the transformed parameters')
+        Dataset_obj.params_var_ = p
 '''
 ======================================
 Physical model class. Subclassed by user to store transformation function,
