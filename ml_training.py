@@ -7,6 +7,7 @@ University of Washington
 import warnings
 import numpy as np
 from statsmodels.stats.outliers_influence import variance_inflation_factor
+from statsmodels.tools import add_constant 
 
 import dataset_processing as dtsp
 import pytorch_integration as pyti
@@ -17,12 +18,8 @@ from analysis import polar_to_complex
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MaxAbsScaler
 from sklearn import metrics
-from sklearn.neural_network import MLPRegressor
-from sklearn.neural_network import MLPClassifier
 from sklearn.base import is_classifier
 from sklearn.base import is_regressor
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.ensemble import RandomForestClassifier
 
 import torch
 from torch import nn
@@ -211,7 +208,7 @@ def pyt_train(ModelDS_obj,learning_rate = 1e-3, epochs=50, batch_size=100,
     p_train_pred = model(torch.from_numpy(ModelDS_obj.Z_train_).to(device,dtype=dtypes))
     p_train_pred = p_train_pred.detach().cpu().numpy()
     
-    ModelDS.model_.load_state_dict(model.state_dict())
+    ModelDS_obj.model_.load_state_dict(model.state_dict())
     ModelDS_obj.p_test_pred_ = p_test_pred
     ModelDS_obj.p_train_pred_ = p_train_pred
     del p_test_pred
@@ -291,8 +288,8 @@ def get_scores(ModelDS_obj,score_method = 'default', verbose=True,**kwargs):
     if ModelDS_obj.model_type_ == 'classifier':
         if score_method == 'default':
             score_method = 'accuracy'
-        if score_method == 'accuracy':
-            train_score = metrics.accuracy_score(ModelDS_obj.p_train_, ModelDS_obj.p_trian_pred_)
+        elif score_method == 'accuracy':
+            train_score = metrics.accuracy_score(ModelDS_obj.p_train_, ModelDS_obj.p_train_pred_)
             test_score = metrics.accuracy_score(ModelDS_obj.p_test_, ModelDS_obj.p_test_pred_)
         else:
             raise NotImplementedError('Other metrics will be implemented later')
@@ -301,12 +298,13 @@ def get_scores(ModelDS_obj,score_method = 'default', verbose=True,**kwargs):
         if score_method == 'default':
             score_method = 'r2'
         if score_method == 'r2':
-            train_score = metrics.r2_score(ModelDS_obj.p_train_, ModelDS_obj.p_trian_pred_)
+            train_score = metrics.r2_score(ModelDS_obj.p_train_, ModelDS_obj.p_train_pred_)
             test_score = metrics.r2_score(ModelDS_obj.p_test_, ModelDS_obj.p_test_pred_)
-        if score_method == 'rmse':
-            train_score = metrics.root_mean_squared_error(ModelDS_obj.p_train_, ModelDS_obj.p_trian_pred_)
+        elif score_method == 'rmse':
+            train_score = metrics.root_mean_squared_error(ModelDS_obj.p_train_, ModelDS_obj.p_train_pred_)
             test_score = metrics.root_mean_squared_error(ModelDS_obj.p_test_, ModelDS_obj.p_test_pred_)
         else:
+            print(score_method)
             raise NotImplementedError('Other metrics will be implemented later')
     ModelDS_obj.train_score_ = train_score
     ModelDS_obj.test_score_ = test_score
@@ -463,20 +461,14 @@ class ModelDS():
                     self.tags_ = np.hstack((['Re ' + t for t in tags[cmplx_idx]],['Im ' + t for t in tags[cmplx_idx]]))
             else:
                 return Zre, Zim, Zadd
-    
-    def correlation(self):
-        if not self.contains_data_:
-            raise Exception('No data detected in model')
-        Zcov = self.Z_.copy()
-        Zcov = pyti.tensor_transform(np.transpose(Zcov))
-        return np.transpose(torch.corrcoef(Zcov).numpy(force=True))
-    
+
     def vif(self):
         if not self.contains_data_:
             raise Exception('No data detected in  model')
+        Zvif = add_constant(self.Z_)
         vif = []
         for i,_ in enumerate(self.Z_[0,:]):
-            vif.append(variance_inflation_factor(self.Z_,i))
+            vif.append(variance_inflation_factor(Zvif,i))
         return np.array(vif)
     
     def train_test_split(self, test_size=0.2, random_state=None):
@@ -576,3 +568,52 @@ class ModelDS():
         '''
         output = self.__dict__.copy()
         return output
+
+'''
+======================================
+ML model analysis functions. These functions are primarily
+concerned with comparing performance across models or datasets.
+======================================
+'''
+
+def pyt_compare_models(model_list, processed_ModelDS,n_jobs=10,name_list = None,plot_comparison=True,
+                       learning_rate = 1e-3, epochs=50, batch_size=100,dynamic_lr=False, dlr_epoch=30, 
+                       dlr_scheduler='exp',scoring=True, score_method = 'default', verbose=True,**kwargs):
+    losses = []
+    if scoring:
+        scores = []
+    for m in model_list:
+        if m is None:
+            m0 = processed_ModelDS.model_.state_dict()
+        score_m = np.zeros((n_jobs,epochs))
+        loss_m = np.zeros((n_jobs,epochs))
+        for n in range(n_jobs):
+            if m is not None:
+                processed_ModelDS.swap_model(m)
+            else:
+                processed_ModelDS.model_.load_state_dict(m0)
+            pyt_train(processed_ModelDS, learning_rate=learning_rate, epochs=epochs, batch_size=batch_size, dynamic_lr=dynamic_lr, dlr_epoch=dlr_epoch, dlr_scheduler=dlr_scheduler,
+              scoring=scoring,score_method=score_method,plotting=False,verbose=verbose,**kwargs)
+            loss_m[n,:] = processed_ModelDS.loss_.flatten()
+            if scoring:
+                score_m[n,:] = processed_ModelDS.score_.flatten()
+        losses.append(loss_m)
+        scores.append(score_m)
+    if plot_comparison:   
+        if name_list is None:
+            name_list = np.arange(1,len(model_list)+1,1).astype(str)
+    if scoring:
+        if plot_comparison:
+            if score_method == 'default':
+                if processed_ModelDS.model_type_ == 'regressor':
+                    score_method = 'r2'
+                if processed_ModelDS.model_type_ == 'classifier':
+                    score_method = 'accuracy'
+            plot_comparison(losses,scores,score_name=score_method,labels=name_list,plot_std=True)
+        return losses, scores
+    else:
+        if plot_comparison:
+            plot_comparison(losses,scores=None,score_name=score_method,labels=name_list,plot_std=True)
+        return losses
+    
+#def pyt_compare_transformations(transformation_list, processed_ModelDS, other stuff yk)
