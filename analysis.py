@@ -1,6 +1,7 @@
 import numpy as np
 from scipy import integrate
 import warnings
+import math
 
 '''
 ======================================
@@ -14,7 +15,7 @@ def complex_to_polar(*args):
     Parameters
     ----------
     *args : np.ndarrays, dtype = np.floatingcomplex
-        Arbitrary number .
+        Arbitrary number of complex arrays.
 
     Returns
     -------
@@ -44,7 +45,7 @@ def polar_to_complex(*args):
     Returns
     -------
     (n_*args)/2 np.arrays, dtype = np.floatingcomplex
-        See *args for output format.
+        See complex_to_polar() input for this output format.
 
     '''
     out = []
@@ -55,6 +56,40 @@ def polar_to_complex(*args):
         complex_vals = r[i]*np.exp(1j*phi[i]) 
         out.append(complex_vals)
     return (val for val in out)
+
+'''
+======================================
+Helper functions for distributed selection.
+======================================
+'''
+def sort_indicies(vallist):
+    idx = range(len(vallist))
+    sorted_list = sorted(idx,key= lambda x: vallist[x],reverse=True)
+    return sorted_list
+
+def update_decay(decaylist, idx, order, alpha):
+    decay_updated = decaylist
+    if idx != 0:
+        l_ord = 1
+        l_idx = idx - 1
+        while l_ord <= order:
+            if l_idx == -1:
+                break
+            else:
+                decay_updated[l_idx] *= math.pow(alpha,1/(l_ord))
+                l_idx -= 1
+                l_ord += 1
+    if idx != len(decaylist) - 1:
+        u_ord = 1
+        u_idx = idx + 1
+        while u_ord <= order:
+            if u_idx == len(decaylist):
+                break
+            else:
+                decay_updated[u_idx] *= math.pow(alpha,1/(u_ord))
+                u_idx += 1
+                u_ord += 1
+    return decay_updated
 
 '''
 ======================================
