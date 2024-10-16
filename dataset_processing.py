@@ -268,10 +268,84 @@ class EISdataset(DS):
         corr_re, corr_im = np.transpose(torch.corrcoef(Zre).numpy(force=True)), np.transpose(torch.corrcoef(Zim).numpy(force=True))
         return corr_re, corr_im
     
-    def select_best_frequencies(self, mode='KBest',  scoring_mode='f_value', mode_val='default', always_take_best=False, p_weights = None, returns = True):
+    def distributed_select_best(self, n_per_target, scoring_mode = 'f_value', alpha = 0.9, order = 2, returns = True):
+        '''
+        Selects target-distributed frequnecies. Includes decay weighting scheme to devalue adjacent frequency
+        selection. If overlap is detected between best-performers, the algorithm fills the remaining values with 
+        summed highest-scoring frequencies to match user-expected output size.
+
+        Parameters
+        ----------
+        n_per_target : list of ints
+            Number of frequencies to select per target. Selected frequencies are highest-scoring relative to
+            the corresponding target and decay weighting.
+       scoring_mode : str, optional
+           Scoring method used to calculate best features. Valid options are f_value and mutual_info. 
+        alpha : float, optional
+            Decay parameter. Selected frequencies apply an adjacency weight = alpha*(1/n), where n is index distance
+            from the frequency.
+        order : int, optional
+            Determines the distance of alpha decay weighting. 
+            If order = 0, no weighting is applied.
+            If order = 1, weighting is applied only to directly adjacent frequencies. 
+            If order > 1, weighting is applied to (order) neighboring indicies.
+        returns : bool, optional
+           If True, return truncated Z and frequency arrays. If False, return nothing.
+           Best indicies are stored as an attribute to be used in truncate_to_best() either way.
+
+        Returns
+        -------
+        Zbest : np.ndarray, dtype = complex
+            Z array truncated to best.
+        freq_best : np.ndarray, dtype = float
+            Frequencies truncated to best.
+
+        '''
+        Zre, Zim = self.separate_real_imag()
+        scores = np.zeros((np.size(self.Z_var_,axis=1),))
+        a_decay = np.ones((np.size(self.Z_var_,axis=1),),dtype=float)
+        if len(n_per_target) == 1:
+            n_per_target = [n_per_target[0]] * np.size(self.params_var_,axis=1)
+        if scoring_mode == 'f_value':
+            score_func = feature_selection.f_regression
+        elif scoring_mode == 'mutual_info':
+            score_func = feature_selection.mutual_info_regression
+        n_best = sum(n_per_target)
+        est = feature_selection.SelectKBest(score_func=score_func,k=n_best)
+        
+        top_ids = []
+        for i,n in enumerate(n_per_target):
+            est.fit(Zre,self.params_var_[:,i])
+            sc_re = est.scores_
+            est.fit(Zim,self.params_var_[:,i])
+            sc_im = est.scores_
+            s = analysis.sort_indicies(((sc_re+sc_im)*a_decay).tolist())
+            search_idx = 0
+            j = 0
+            while j < n:
+                if s[search_idx] not in top_ids:
+                    top_ids.append(s[search_idx])
+                    #print(sc)
+                    if alpha < 1:
+                        a_decay = analysis.update_decay(a_decay,s[search_idx],alpha=alpha,order=order)
+                        s = analysis.sort_indicies(((sc_re+sc_im)*a_decay).tolist())
+                    search_idx = 0
+                    j += 1
+                else:
+                    search_idx += 1
+            scores += (sc_re+sc_im)
+
+        Zbest = self.Z_var_[:,top_ids]
+        freq_best = self.f_gen_[top_ids]
+        self.best_ids_ = top_ids
+        if returns:
+            return Zbest, freq_best
+
+    def select_best(self, mode='KBest',  scoring_mode='f_value', mode_val='default', always_take_best=False, p_weights = None, returns = True):
         '''
         Selects the best frequencies based on f_value or mutual info criteria. Weights
-        may be provided to 
+        may be provided to value/devalue targets as desired. For more evenly-distributed
+        frequency selection, see distributed_select_best().
 
         Parameters
         ----------
@@ -782,8 +856,9 @@ class EISPdataset(EISdataset):
     '''
     TO DO:
         1. Parameter regression to fit model to experimental data
+            1a. Potential options: scipy.optimize.curve_fit(), lmfit package
         2. Comparison of multiple physical models for goodness of fit?
-        3. 
+            2a. Comes after regression fit is accomplished.
     '''
     
 '''
@@ -1018,11 +1093,14 @@ Users should provide the following:
         a. Defines the impedance returned from a set of variables and constants
         b. Variables: Can be changed within a dataset during variation.
         c. Constants: Must be changed BETWEEN variation datasets, if at all.
+        d. Omega: Angular frequency (Note: PhysicalModel.z_gen() takes non-angular frequencies
+                                     and performs an internal conversion to angular.)
 
     Example below:
     -----------------
 class CoveredElectrode(PhysicalModel):
-    def __init__(self, name, variable_names = None, constant_names = None, variable_units = None, constant_units = None):
+    def __init__(self, name, variable names = ['gamma','Zf','Cl','Cdl'],constant_names = ['Re'],
+                 variable_units = ['','Ohm*cm^2','F/cm^2','F/cm^2'], constant_units = ['Ohm*cm^2']):
         super().__init__(name, variable_names, constant_names, variable_units, constant_units)
     
     def ptransform(omega, variables, constants):
@@ -1056,7 +1134,18 @@ class PhysicalModel():
         elif not isinstance(frequencies,np.ndarray):
             raise Exception('Valid frequency input types: array or list')
         if isinstance(variables,(list,float,int)):
-            variables = np.array(variables)
+            if isinstance(variables,list):
+                nvars = len(variables)
+                if isinstance(variables[0],tuple):
+                    is_tuple = True
+                    variables = np.array(variables).T
+                elif isinstance(variables[0],(float,int)):
+                    is_tuple = False
+                    variables = np.array(variables)
+            else:
+                is_tuple = False
+                nvars = 1
+                variables = np.array(variables)
         elif not isinstance(variables,np.ndarray):
             raise Exception('Valid variable input types: array, list, int, or float')
         if isinstance(constants,(list,float,int)):
@@ -1066,32 +1155,34 @@ class PhysicalModel():
         if EISP_obj is not None and not isinstance(EISP_obj,EISPdataset):
             raise Exception('EISP_obj must be an EISPdataset() object')
             
-        if any(isinstance(x, (float,int)) for x in variables):
-            nvar = np.size(variables,axis=0)
+        ngen = n_sets
+        if not is_tuple:
+            ngen = np.size(variables,axis=0)
             explicit_gen = True
-        if any(isinstance(x, tuple) for x in variables):
-            if np.size(variables,axis=0) > 1:
+        else:
+            if np.size(variables,axis=0) != 2:
                 raise Exception('When passing tuples, only 1 set of (lb,ub) is accepted. Size in axis=0 is {}'.format(np.size(variables,axis=0)))
-            nvar = n_sets
             nfreq = np.size(frequencies)
-            lb = np.array([l[0] for l in variables])
-            ub = np.array([u[1] for u in variables])
+            lb = variables[0,:]
+            ub = variables[1,:]
             gen = np.random.Generator(np.random.PCG64())
-            gen_vars = gen.uniform(lb,ub,size=(nvar,np.size(variables,axis=1)))
+            gen_vars = gen.uniform(lb,ub,size=(ngen,nvars))
             explicit_gen = False
         if EISP_obj is None:
             EISP = EISPdataset(self.name_)
-            
-        Z = np.empty((nvar,nfreq))
-        for n in range(nvar):
-            if explicit_gen:
-                Z[n,:] = self.transform(frequencies*2*np.pi,variables[n,:],constants)
-            else:
-                Z[n,:] = self.transform(frequencies*2*np.pi,gen_vars[n,:],constants)
         
-        ID = np.full((nvar,1),self.ID_tracker_)
+        Z = np.empty((ngen,nfreq),dtype=complex)
+        for n in range(ngen):
+            if explicit_gen:
+                Z[n,:] = self.ptransform(frequencies*np.pi*2,variables[n,:],constants)
+            else:
+                Z[n,:] = self.ptransform(frequencies*np.pi*2,gen_vars[n,:],constants)
+        ID = np.full((ngen,1),self.ID_tracker_)
         if not EISP.contains_data_:
-            EISP.params_var_ = Z
+            EISP.f_gen_ = frequencies
+            EISP.tags_ =np.char.mod('%.2e',frequencies)
+            EISP.Z_var_ = Z
+            EISP.params_var_ = gen_vars
             EISP.dsID_ = ID
             EISP.params_names_ = self.variable_names_
             EISP.params_units_ = self.variable_units_
@@ -1099,7 +1190,8 @@ class PhysicalModel():
             EISP.constant_units_ = self.constant_units_
             EISP.constants_ = constants
         else:
-            EISP.params_var_ = np.vstack((EISP.params_var_,Z))
+            EISP.Z_var_ = np.vstack((EISP.Z_var_,Z))
+            EISP.params_var_ = np.vstack((EISP.params_var_,gen_vars))
             EISP.dsID_ = np.vstack((EISP.dsID_,ID))
             EISP.constants_ = np.vstack((EISP.constants_,constants)) # Only store 1 version of constants, which corresponds to data through dsID_
 
