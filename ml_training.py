@@ -157,7 +157,7 @@ def pyt_train(ModelDS_obj,learning_rate = 1e-3, epochs=50, batch_size=100,
     allloss = np.empty((epochs,1))
     
     if not dynamic_lr:
-        optimizer = optim.Adam(model.parameters(),lr=learning_rate)
+        optimizer = optim.AdamW(model.parameters(),lr=learning_rate)
         for t in range(epochs):
             if verbose:
                 print(f"Epoch {t+1}\n-------------------------------")
@@ -166,7 +166,7 @@ def pyt_train(ModelDS_obj,learning_rate = 1e-3, epochs=50, batch_size=100,
             allscores[t] = cscore
             allloss[t] = closs
     else:
-        optimizer = optim.Adam(model.parameters(),lr=learning_rate)
+        optimizer = optim.AdamW(model.parameters(),lr=learning_rate)
         if dlr_scheduler == 'exp':
             gamma = kwargs.get('gamma',0.95)
             if verbose:
@@ -354,6 +354,12 @@ class ModelDS():
                 self.model_type_ = 'classifier'
             else:
                 raise Exception('Invalid pyt_mode input. Valid inputs: regression; classification')
+        elif is_classifier(model):
+            self.model_type_ = 'classifier'
+            self.pytorch_ = False
+        elif is_regressor(model):
+            self.model_type_ = 'regressor'
+            self.pytorch_ = False
         if name is None:
             self.name_ = self.model_type_
         else:
