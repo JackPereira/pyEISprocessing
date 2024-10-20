@@ -131,8 +131,8 @@ class DS():
                 tags = np.array(tags)
             if not isinstance(tags,np.ndarray):
                 raise Exception('tags must be a numpy array or list')
-            self.ap_ = np.hstack(self.ap_,added_array)
-            self.ap_tags_ = np.hstack(self.ap_tags_,tags)
+            self.ap_ = np.hstack(([self.ap_,added_array]))
+            self.ap_tags_ = np.hstack((self.ap_tags_,tags))
             
     def rename(self, name):
         '''
@@ -163,6 +163,25 @@ class DS():
         '''
         return self.tags_, self.ap_tags_
     
+    def Z_correlation(self):
+        nz = np.size(self.Z_var_,axis=1)
+        npar = np.size(self.params_var_,axis=1)
+        corrs = np.empty((nz*2,npar))
+        for z in range(nz):
+            for p in range(npar):
+                corrs[z,p] = analysis.pearson_corr(np.real(self.Z_var_[:,z]), self.params_var_[:,p])
+                corrs[z+nz,p] = analysis.pearson_corr(np.imag(self.Z_var_[:,z]), self.params_var_[:,p])
+        return corrs
+    
+    def ap_correlation(self):
+        nap = np.size(self.ap_,axis=1)
+        npar = np.size(self.params_var_,axis=1)
+        corrs = np.empty((nap,npar))
+        for a in range(nap):
+            for p in range(npar):
+                corrs[a,p] = analysis.pearson_corr(self.ap_[:,a], self.params_var_[:,p])
+        return corrs
+    
     def __getstate__(self):
         '''
         Returns a copy of the object dictionary.
@@ -170,7 +189,7 @@ class DS():
         '''
         output = self.__dict__.copy()
         return output
-
+    
 '''
 ======================================
 EIS dataset class, primarily used to store raw EIS data,
@@ -338,6 +357,7 @@ class EISdataset(DS):
         Zbest = self.Z_var_[:,top_ids]
         freq_best = self.f_gen_[top_ids]
         self.best_ids_ = top_ids
+        self.best_ids_.sort()
         if returns:
             return Zbest, freq_best
 
@@ -417,6 +437,7 @@ class EISdataset(DS):
         Zbest = self.Z_var_[:,Zbest_id]
         freq_best = self.f_gen_[Zbest_id]
         self.best_ids_ = Zbest_id
+        self.best_ids_.sort()
         if returns:
             return Zbest, freq_best
     
