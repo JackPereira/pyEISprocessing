@@ -58,16 +58,23 @@ def read_files(path):
     else:
         dir_list = os.listdir(path)
         dir_list = [d for d in dir_list if os.path.isfile(os.path.join(path,d))]
-        Z_files = [z for z in dir_list if z.endswith('.z')]
+        Z_files = [z for z in dir_list if z.endswith(('.z','.dta','.par','.par','.csv'))]
         filenames = [os.path.splitext(f)[0] for f in Z_files]
         
         Z_dict = {}
         f_dict = {}
         
         for i,file in enumerate(filenames):
+            if Z_files[i].endswith('.z'):
                 f, Z = preprocessing.readZPlot(path+Z_files[i])
-                Z_dict.update({file: Z})
-                f_dict.update({file: f})
+            elif Z_files[i].endswith('.dta'):
+                f, Z = preprocessing.readGamry(path+Z_files[i])
+            elif Z_files[i].endswith('.par'):
+                f, Z = preprocessing.readVersaStudio(path+Z_files[i])
+            elif Z_files[i].endswith('.csv'):
+                f, Z = preprocessing.readCSV(path+Z_files[i])
+            Z_dict.update({file: Z})
+            f_dict.update({file: f})
     
     return f_dict, Z_dict, Z_files
 
@@ -80,7 +87,7 @@ def save_obj(saved_object, to_file = True, to_var = False, savepath = ''):
             pickle.dump(saved_object, output_file, pickle.HIGHEST_PROTOCOL)
     if to_var:
         return stream
-    
+
 def load_obj(save_location):
     if isinstance(save_location,bytes):
         output = pickle.loads(save_location)
@@ -166,11 +173,15 @@ class DS():
     def Z_correlation(self):
         nz = np.size(self.Z_var_,axis=1)
         npar = np.size(self.params_var_,axis=1)
-        corrs = np.empty((nz*2,npar))
+        if isinstance(self,DRTdataset):
+            corrs = np.empty((nz,npar))
+        else:
+            corrs = np.empty((nz*2,npar))
         for z in range(nz):
             for p in range(npar):
                 corrs[z,p] = analysis.pearson_corr(np.real(self.Z_var_[:,z]), self.params_var_[:,p])
-                corrs[z+nz,p] = analysis.pearson_corr(np.imag(self.Z_var_[:,z]), self.params_var_[:,p])
+                if isinstance(self,EISdataset):
+                    corrs[z+nz,p] = analysis.pearson_corr(np.imag(self.Z_var_[:,z]), self.params_var_[:,p])
         return corrs
     
     def ap_correlation(self):
@@ -354,11 +365,11 @@ class EISdataset(DS):
                     search_idx += 1
             scores += (sc_re+sc_im)
 
-        Zbest = self.Z_var_[:,top_ids]
-        freq_best = self.f_gen_[top_ids]
         self.best_ids_ = top_ids
         self.best_ids_.sort()
         if returns:
+            Zbest = self.Z_var_[:,top_ids]
+            freq_best = self.f_gen_[top_ids]
             return Zbest, freq_best
 
     def select_best(self, mode='KBest',  scoring_mode='f_value', mode_val='default', always_take_best=False, p_weights = None, returns = True):
@@ -434,13 +445,35 @@ class EISdataset(DS):
         est.scores_ = scores
         Zbest = est.transform(Zre)
         Zbest_id = est.get_feature_names_out(input_features=ids).tolist()
-        Zbest = self.Z_var_[:,Zbest_id]
-        freq_best = self.f_gen_[Zbest_id]
+        
         self.best_ids_ = Zbest_id
         self.best_ids_.sort()
         if returns:
+            Zbest = self.Z_var_[:,Zbest_id]
+            freq_best = self.f_gen_[Zbest_id]
             return Zbest, freq_best
     
+    def add_ap_best(self, real=True, imag=True, separate_components=False):
+        if 'best_ids_' not in self.__dict__:
+            raise Exception('Best frequencies not found. Run [OBJ].select_best_frequencies() or [OBJ].distributed_select_best() to select best frequencies.')
+        if real and imag:
+            if not separate_components:
+                ap = self.Z_var_[:,self.best_ids_]
+                tags = self.tags_[self.best_ids_]
+            else:
+                ap = np.hstack((np.real(self.Z_var_[:,self.best_ids_]),np.imag(self.Z_var_[:,self.best_ids_])))
+                tags = ['Re ' + x for x in self.tags_[self.best_ids_]]
+                tags.extend(['Im ' + x for x in self.tags_[self.best_ids_]])
+        elif real and not imag:
+            ap = np.real(self.Z_var_[:,self.best_ids_])
+            tags = ['Re ' + x for x in self.tags_[self.best_ids_]]
+        elif imag and not real:
+            ap = np.imag(self.Z_var_[:,self.best_ids_])
+            tags = ['Im ' + x for x in self.tags_[self.best_ids_]]
+        else:
+            raise Exception('Either real or imag must be True')
+        self.addparams(ap, tags)
+        
     def truncate_to_best(self):
         '''
         Truncates stored data to best frequencies. Destructive to dataset; lost datapoints are
@@ -449,10 +482,13 @@ class EISdataset(DS):
         
         '''
         if 'best_ids_' not in self.__dict__:
-            raise Exception('Best frequencies not found. Run [OBJ].select_best_frequencies() to access truncation.')
+            raise Exception('Best frequencies not found. Run [OBJ].select_best_frequencies() or [OBJ].distributed_select_best() to access truncation.')
         self.Z_var_ = self.Z_var_[:,self.best_ids_]
         self.Z_basefit_ = self.Z_basefit_[:,self.best_ids_]
         self.f_gen_ = self.f_gen_[self.best_ids_]
+     
+    def save_CSV(self, filename,**kwargs):
+        preprocessing.saveCSV(filename,self.f_gen_,self.Z_var_,**kwargs)
         
 class EISCdataset(EISdataset):
     def __init__(self, path, dataset_name, from_files = True):
@@ -563,7 +599,7 @@ class EISCdataset(EISdataset):
         if verbose:
             print('Circuit fitting complete!')
     
-    def test_circuits(self,circuit_strings,initial_guesses,score='MAPE',names=None,global_optimization=False,validate=True,save_figure=False,**kwargs):
+    def fit_multiple_circuits(self,circuit_strings,initial_guesses,score='MAPE',names=None,global_optimization=False,validate=True,save_figure=False,**kwargs):
         ndata = len(self.files_)
         ncir = len(circuit_strings)
         filenames = [os.path.splitext(f)[0] for f in self.files_]
@@ -897,11 +933,32 @@ class DRTdataset(DS):
         self.params_units_ = EISdata.params_units_
         self.contains_data_ = False
         self.name_ = EISdata.name_ + 'DRT'
-        self.DRTdata_ = None
+        self.Z_var_ = None
         self.tags_ = None
         self.ap_ = None
         self.ap_tags_ = None
+    
+    @classmethod
+    def from_EIS(cls, EISdataset,**kwargs):
+        '''
+        One-line transformation of EIS data.
+        Bypasses separate DS initialization and drt_transform() call steps.
+        
+        Parameters
+        ----------
+        EISdataset : EISdataset
+            EIS data object.
 
+        Returns
+        -------
+        drt : DRTdataset
+            DRT-transformed data.
+
+        '''
+        drt = cls(EISdataset)
+        drt.drt_transform(EISdataset,**kwargs)
+        return drt
+        
     def drt_transform(self,EISdata,fine=True, timer = True, timer_frac = 0.05, **kwargs):
         '''
         Transforms EIS data into a corresponding DRT dataset.
@@ -933,7 +990,7 @@ class DRTdataset(DS):
             self.tau_ = DRT_obj.tau_fine
         else:
             self.tau_ = DRT_obj.tau
-        self.DRTdata_ = np.empty((ndata,len(self.tau_)))
+        self.Z_var_ = np.empty((ndata,len(self.tau_)))
         self.tags_ = np.char.mod('$.2e', self.tau_)
             
         rbf_type = kwargs.get('rbf_type','Gaussian')
@@ -956,10 +1013,10 @@ class DRTdataset(DS):
             DRT.Simple_run(DRT_obj, rbf_type, data_used, induct_used,
                            der_used, lambda_value, shape_control, coeff)
             if fine:
-                self.DRTdata_[i,:] = DRT_obj.gamma
+                self.Z_var_[i,:] = DRT_obj.gamma
                 self.is_fine_ = True
             else:
-                self.DRTdata_[i,:] = DRT_obj.gamma[::10]
+                self.Z_var_[i,:] = DRT_obj.gamma[::10]
                 self.is_fine_ = False
 
             if timer:
@@ -997,20 +1054,21 @@ class DRTdataset(DS):
             self.ap_ = np.hstack((self.ap_,highf_real))
             self.ap_tags_ = np.hstack((self.ap_tags_,np.array(['high f Re'])))
     
-    def course_to_fine(self):
+    def fine_to_course(self):
         if not self.contains_data_:
             raise Exception('No data found in dataset')
         if 'is_fine_' not in self.__dict__:
             self.tau_ = self.tau_[::10]
-            self.DRTdata_ = self.DRTdata_[:,::10]
-            self.is_fine_ = True
+            self.Z_var_ = self.Z_var_[:,::10]
+            self.tags_ = self.tags_[:,::10]
+            self.is_fine_ = False
         else:
-            if self.is_fine_:
+            if not self.is_fine_:
                 raise Exception('Data is already fine; cannot reduce further')
             else:
                 self.tau_ = self.tau_[::10]
-                self.DRTdata_ = self.DRTdata_[:,::10]
-                self.is_fine_ = True
+                self.Z_var_ = self.Z_var_[:,::10]
+                self.is_fine_ = False
     
     def peak_analysis(self, n_peaks, cutoff_frac = 0.1, get_gamma = True, get_tau = True, get_area = True,
                        verbose = True, der = 1):
